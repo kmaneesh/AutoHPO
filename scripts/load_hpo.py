@@ -1,7 +1,13 @@
 #!/usr/bin/env python3
 """
 Parse HPO obographs JSON (data/hp.json), embed terms, push to Meilisearch.
-MVP Phase 1: hp.json only. Uses MEILISEARCH_URL from env.
+MVP Phase 1: hp.json only.
+
+Creates index: hpo (primary key: hpo_id).
+
+Env:
+  MEILISEARCH_URL   – Meilisearch URL (e.g. http://localhost:7700)
+  MEILI_MASTER_KEY  – API key if your instance uses one (e.g. masterKey)
 """
 from __future__ import annotations
 
@@ -10,6 +16,13 @@ import json
 import os
 import sys
 from pathlib import Path
+
+# Load .env from project root so MEILISEARCH_URL / MEILI_MASTER_KEY are set when run as script
+try:
+    from dotenv import load_dotenv
+    load_dotenv(Path(__file__).resolve().parent.parent / ".env")
+except ImportError:
+    pass
 
 try:
     from meilisearch import Client as MeilisearchClient
@@ -67,6 +80,7 @@ def parse_obographs(path: Path) -> list[dict]:
 def load_hpo(
     json_path: Path,
     meilisearch_url: str,
+    api_key: str | None = None,
     index_uid: str = HPO_INDEX_UID,
     embed: bool = True,
     batch_size: int = 500,
@@ -98,7 +112,7 @@ def load_hpo(
             for t, vec in zip(terms, embeddings, strict=True):
                 t["_embedding"] = vec.tolist()
 
-    client = MeilisearchClient(meilisearch_url)
+    client = MeilisearchClient(meilisearch_url, api_key=api_key or None)
     try:
         client.get_index(index_uid)
     except Exception:
@@ -142,6 +156,11 @@ def main() -> None:
         help="Meilisearch URL (default: MEILISEARCH_URL env)",
     )
     parser.add_argument(
+        "--meili-master-key",
+        default=os.environ.get("MEILI_MASTER_KEY", ""),
+        help="Meilisearch API key (default: MEILI_MASTER_KEY env)",
+    )
+    parser.add_argument(
         "--no-embed",
         action="store_true",
         help="Skip embedding (keyword-only search)",
@@ -158,7 +177,8 @@ def main() -> None:
     if not url:
         print("Error: set MEILISEARCH_URL or pass --meilisearch-url", file=sys.stderr)
         sys.exit(1)
-    load_hpo(json_path, url, embed=not args.no_embed, batch_size=args.batch_size)
+    api_key = (args.meili_master_key or "").strip() or None
+    load_hpo(json_path, url, api_key=api_key, embed=not args.no_embed, batch_size=args.batch_size)
 
 
 if __name__ == "__main__":
