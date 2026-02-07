@@ -1,9 +1,10 @@
 """
-MCP server exposing HPO search (and optionally agent) as tools for LLM/MCP clients.
-One job: MCP only. Run as a separate process: python -m app.mcp_server (stdio).
+MCP server: tools for LLM/MCP clients and GET /api/sse endpoint.
+Uses FastMCP 2.x. Run stdio: python -m app.mcp_server. SSE: GET /api/sse (mounted in main).
 """
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 try:
@@ -13,39 +14,55 @@ except ImportError:
     pass
 
 try:
-    from mcp.server.fastmcp import FastMCP
-    _HAS_MCP = True
+    from fastmcp import FastMCP
+    _HAS_FASTMCP = True
 except ImportError:
-    _HAS_MCP = False
+    _HAS_FASTMCP = False
 
-mcp = FastMCP("AutoHPO", json_response=True) if _HAS_MCP else None
+from fastapi import APIRouter
+from fastapi.responses import StreamingResponse
+
+mcp = FastMCP("AutoHPO") if _HAS_FASTMCP else None
+
+router = APIRouter()
 
 
-def _search_hpo_tool(query: str, limit: int = 10) -> str:
+@router.get("/api/sse")
+async def api_sse():
+    """SSE endpoint for MCP clients."""
+    async def event_stream():
+        yield "event: connected\ndata: {\"message\": \"AutoHPO MCP\", \"tools\": [\"search_hpo\"]}\n\n"
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+def _search_hpo_impl(query: str, limit: int = 10) -> str:
     """Call the search funnel (Meilisearch then regex on hp.json)."""
     from app.search import search_funnel
-    import json
     results = search_funnel(query=query, limit=limit)
     return json.dumps(results, indent=2)
 
 
-if _HAS_MCP and mcp is not None:
+if _HAS_FASTMCP and mcp is not None:
 
-    @mcp.tool()
+    @mcp.tool
     def search_hpo(query: str, limit: int = 10) -> str:
         """
         Search the Human Phenotype Ontology (HPO) by natural language or keyword.
         Use for phenotypes, clinical features, symptoms, or HPO term IDs (e.g. HP:0001631).
         Returns JSON list of terms with hpo_id, name, definition, synonyms_str.
         """
-        return _search_hpo_tool(query=query, limit=limit)
+        return _search_hpo_impl(query=query, limit=limit)
 
 
 def run_stdio():
     """Run the MCP server over stdio (for Cursor/other MCP clients)."""
-    if not _HAS_MCP or mcp is None:
-        raise RuntimeError("Install mcp to run the MCP server: pip install mcp")
-    mcp.run(transport="stdio")
+    if not _HAS_FASTMCP or mcp is None:
+        raise RuntimeError("Install FastMCP 2.x: pip install 'fastmcp<3'")
+    mcp.run()
 
 
 if __name__ == "__main__":

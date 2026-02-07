@@ -1,11 +1,13 @@
 """
-Full-fledged Agno HPO agent: system message, HPO tool (Meilisearch via hpo.py),
-history, optional DB. One job: run the agent.
+Full-fledged Agno HPO agent: system message, HPOTools, history. One job: run the agent.
+Defines POST /api/chat. Agent is initialised once (singleton).
 """
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
+from typing import Any, List
 
 try:
     from dotenv import load_dotenv
@@ -13,29 +15,65 @@ try:
 except ImportError:
     pass
 
-from agno.agent import Agent
-from agno.models.openai import OpenAIChat
+from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel
 
 from app.hpo import search_hpo
 
-# HPO tool: wrap hpo.search_hpo for the agent (same signature, good docstring for LLM).
-def hpo_tool(query: str, limit: int = 10) -> str:
-    """
-    Search the Human Phenotype Ontology (HPO) by natural language or keyword.
-    Use this for any question about phenotypes, clinical features, symptoms, or HPO terms.
-    Search by condition description, phenotype name, or HPO ID (e.g. HP:0001631).
-
-    Args:
-        query: Search query (e.g. "atrial septal defect", "heart abnormality").
-        limit: Maximum number of terms to return (default 10).
-
-    Returns:
-        JSON list of HPO terms with hpo_id, name, definition, synonyms_str.
-    """
-    return search_hpo(query=query, limit=limit)
+# Lazy singleton; initialised once on first get_agent() call
+_agent = None
 
 
-HPO_SYSTEM_MESSAGE = """\
+class ChatRequest(BaseModel):
+    query: str
+
+
+class ChatResponse(BaseModel):
+    response: str
+
+
+def _format_search_results_as_response(results: list) -> str:
+    """Format search funnel results as plain text for ChatResponse."""
+    if not results:
+        return "No HPO terms found."
+    lines = ["**Search results (HPO):**", ""]
+    for t in results:
+        lines.append(f"- **{t.get('hpo_id', '')}** {t.get('name', '')}")
+        if t.get("definition"):
+            lines.append(f"  {str(t['definition'])[:200]}…")
+        lines.append("")
+    return "\n".join(lines).strip()
+
+
+# --- Agno agent (import here to avoid circular deps; build after router)
+def _build_agent():
+    from agno.agent import Agent
+    from agno.models.openai import OpenAIChat
+    from agno.tools import Toolkit
+
+    class HPOTools(Toolkit):
+        def __init__(self, **kwargs: Any):
+            tools: List[Any] = [self.search_hpo, self.get_hpo_term]
+            super().__init__(name="hpo_tools", tools=tools, **kwargs)
+
+        def search_hpo(self, query: str, limit: int = 10) -> str:
+            try:
+                return search_hpo(query=query, limit=limit)
+            except Exception as e:
+                return f"Error searching HPO for '{query}': {e}"
+
+        def get_hpo_term(self, term_id: str) -> str:
+            try:
+                q = term_id.strip().replace("_", ":", 1) if "_" in term_id else term_id.strip()
+                raw = search_hpo(query=q, limit=1)
+                results = json.loads(raw)
+                if results:
+                    return json.dumps(results[0], indent=2)
+                return f"No HPO term found for ID: {term_id}"
+            except Exception as e:
+                return f"Error fetching HPO term '{term_id}': {e}"
+
+    HPO_SYSTEM_MESSAGE = """\
 You are an HPO (Human Phenotype Ontology) assistant that helps users find phenotype terms from natural language descriptions of clinical features, symptoms, or conditions.
 
 ## Your responsibilities
@@ -53,23 +91,15 @@ You are an HPO (Human Phenotype Ontology) assistant that helps users find phenot
 - Use clear, professional language. You may use markdown for lists and structure.
 """
 
-
-def get_agent() -> Agent:
-    """Build the full-fledged HPO agent with tool, history, and optional DB."""
-    model_id = os.environ.get("OPENAI_MODEL_ID", "gpt-4o-mini")
-    db = None
-    try:
-        from agno.db.sqlite import SqliteDb
-        db_path = Path(__file__).resolve().parent.parent / "tmp" / "data.db"
-        db_path.parent.mkdir(parents=True, exist_ok=True)
-        db = SqliteDb(db_file=str(db_path))
-    except Exception:
-        pass
-
+    model = OpenAIChat(
+        base_url=os.environ.get("OPENAI_BASE_URL", "http://100.72.226.65:1234/v1"),
+        id=os.environ.get("OPENAI_MODEL_ID", "qwen2.5-7b-instruct-1m"),
+        api_key=os.environ.get("OPENAI_API_KEY", "NA"),
+    )
     return Agent(
         name="HPO Agent",
-        model=OpenAIChat(id=model_id),
-        tools=[hpo_tool],
+        model=model,
+        tools=[HPOTools()],
         system_message=HPO_SYSTEM_MESSAGE,
         add_datetime_to_context=True,
         add_history_to_context=True,
@@ -77,5 +107,33 @@ def get_agent() -> Agent:
         read_chat_history=True,
         enable_agentic_memory=True,
         markdown=True,
-        db=db,
     )
+
+
+def get_agent():
+    """Return the singleton agent; initialise once on first call."""
+    global _agent
+    if _agent is None:
+        _agent = _build_agent()
+    return _agent
+
+
+router = APIRouter()
+
+
+@router.post("/api/chat", response_model=ChatResponse)
+def api_chat(body: ChatRequest):
+    """Run the HPO agent; if LLM is unavailable, fall back to pure search."""
+    try:
+        agent = get_agent()
+        run = agent.run(body.query)
+        content = getattr(run, "content", None) or str(run)
+        return ChatResponse(response=content or "")
+    except Exception:
+        try:
+            from app.search import search_funnel
+            results = search_funnel(query=body.query, limit=15)
+            text = _format_search_results_as_response(results)
+            return ChatResponse(response=f"*Agent unavailable. Using search:*\n\n{text}")
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))

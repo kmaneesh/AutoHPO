@@ -5,4 +5,5 @@ meilisearch>=0.40.0
 sentence-transformers>=3.0.0
 python-dotenv>=1.0.0
 agno>=2.0.0
-mcp>=1.0.0
+fastmcp>=2.0,<3
+pytest>=8.0

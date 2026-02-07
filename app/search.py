@@ -1,7 +1,6 @@
 """
-Search funnel: try Meilisearch (hpo) then fall back to regex search on data/hp.json.
-Returns a unified list of HPO term dicts (hpo_id, name, definition, synonyms_str).
-One job: orchestrate search fallbacks.
+Search funnel and POST /api/search endpoint.
+Funnel: Meilisearch (hpo) then regex on data/hp.json.
 """
 from __future__ import annotations
 
@@ -9,7 +8,26 @@ import json
 import re
 from pathlib import Path
 
-from app.hpo import search_hpo
+from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel
+
+from app.hpo import prepare_search_query, search_hpo
+
+router = APIRouter()
+
+
+class SearchRequest(BaseModel):
+    query: str
+
+
+@router.post("/api/search")
+def api_search(body: SearchRequest):
+    """Pure HPO search: Meilisearch then regex on hp.json. Returns JSON list of HPO terms."""
+    try:
+        results = search_funnel(query=body.query, limit=15)
+        return {"results": results}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 # Project root and data path (hp.json)
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -85,7 +103,7 @@ def regex_search_hp_json(query: str, limit: int = 10) -> list[dict]:
 
 def search_funnel(query: str, limit: int = 15) -> list[dict]:
     """
-    Funnel: (1) Meilisearch via hpo.search_hpo; (2) on failure, regex on data/hp.json.
+    Funnel: (1) Meilisearch via hpo.search_hpo (normalizes query internally); (2) on failure, regex on data/hp.json.
     Returns list of dicts with hpo_id, name, definition, synonyms_str.
     """
     try:
@@ -93,4 +111,5 @@ def search_funnel(query: str, limit: int = 15) -> list[dict]:
         return json.loads(raw)
     except Exception:
         pass
-    return regex_search_hp_json(query=query, limit=limit)
+    q = prepare_search_query(query)
+    return regex_search_hp_json(query=q, limit=limit)
