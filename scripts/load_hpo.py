@@ -11,12 +11,14 @@ Env:
   ENABLE_EMBEDDING        – "true" (default) = keyword + embedding search; "false" = keyword-only
   EMBEDDING_MODEL         – sentence-transformers model (default: sentence-transformers/all-MiniLM-L6-v2)
   FORCE_EMBEDDING_DOWNLOAD – "true" to re-download the model (fixes UNEXPECTED position_ids / bad cache)
+  REPLACE_INDEX             – "true" or --replace-index to delete existing index and load fresh (no duplicates/stale data)
 """
 from __future__ import annotations
 
 import argparse
 import json
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -41,10 +43,17 @@ SEARCHABLE_ATTRIBUTES = ["hpo_id", "name", "definition", "synonyms_str"]
 
 
 def _curie_to_safe_id(curie: str) -> str:
-    """Meilisearch document id: alphanumeric, hyphens, underscores only. Use at presentation to show CURIE with colon."""
+    """Meilisearch document id: only a-z A-Z 0-9, hyphens, underscores (max 511 bytes). hpo_id kept for display."""
     if not curie:
         return ""
-    return curie.replace(":", "_")
+    # Replace any character not allowed by Meilisearch with underscore (e.g. : # /)
+    safe = re.sub(r"[^a-zA-Z0-9_-]", "_", curie)
+    safe = re.sub(r"_+", "_", safe).strip("_")
+    if not safe:
+        safe = "unknown"
+    if len(safe.encode("utf-8")) > 511:
+        safe = safe[:500]
+    return safe
 
 
 def _curie_from_id(node_id: str) -> str:
@@ -112,6 +121,11 @@ def _force_embedding_download() -> bool:
     return v in ("1", "true", "yes")
 
 
+def _replace_index() -> bool:
+    v = os.environ.get("REPLACE_INDEX", "").strip().lower()
+    return v in ("1", "true", "yes")
+
+
 def load_hpo(
     json_path: Path,
     meilisearch_url: str,
@@ -120,6 +134,7 @@ def load_hpo(
     embed: bool = True,
     embedding_model: str | None = None,
     force_embedding_download: bool = False,
+    replace_index: bool = False,
     batch_size: int = 500,
 ) -> None:
     if not json_path.exists():
@@ -131,6 +146,7 @@ def load_hpo(
     use_embedding = embed and _embedding_enabled()
     model_id = (embedding_model or _embedding_model()).strip()
     force_download = force_embedding_download or _force_embedding_download()
+    do_replace_index = replace_index or _replace_index()
 
     print(f"Parsing {json_path} ...")
     terms = parse_obographs(json_path)
@@ -196,6 +212,15 @@ def load_hpo(
     except Exception as e:
         print(f"Meilisearch client error: {e}", file=sys.stderr)
         sys.exit(1)
+    # Option: delete existing index and load fresh (no stale data, no duplicates from previous runs)
+    if do_replace_index:
+        try:
+            idx = client.get_index(index_uid)
+            print(f"Deleting existing index '{index_uid}' (--replace-index) ...")
+            task_info = idx.delete()
+            idx.wait_for_task(task_info.task_uid, timeout_in_ms=15_000)
+        except Exception:
+            pass  # index may not exist
     try:
         idx = client.get_index(index_uid)
         idx.fetch_info()
@@ -211,8 +236,8 @@ def load_hpo(
         idx = client.index(index_uid)
     idx.update_searchable_attributes(SEARCHABLE_ATTRIBUTES)
 
-    # Primary key must be alphanumeric/underscore/hyphen only; id = HP_0000001, hpo_id = HP:0000001 for display
-    documents = []
+    # Build documents; deduplicate by id so one document per primary key (last wins)
+    seen_ids: dict[str, dict] = {}
     for t in terms:
         doc = {
             "id": t["id"],
@@ -223,7 +248,12 @@ def load_hpo(
         }
         if use_embedding and "_embedding" in t:
             doc["_embedding"] = t["_embedding"]
-        documents.append(doc)
+        seen_ids[t["id"]] = doc
+    documents = list(seen_ids.values())
+    if len(documents) < len(terms):
+        print(f"Deduplicated by id: {len(terms)} terms -> {len(documents)} documents (dropped {len(terms) - len(documents)} duplicate ids).")
+
+    # Primary key must be alphanumeric/underscore/hyphen only; id = HP_0000001, hpo_id = HP:0000001 for display
 
     # Meilisearch indexation is async: we must wait for each task or data may not appear
     timeout_ms = 300_000  # 5 min per batch for large payloads with embeddings
@@ -257,6 +287,7 @@ def _run_load_hpo(args: argparse.Namespace) -> None:
         embed=not args.no_embed,
         embedding_model=embed_model,
         force_embedding_download=args.force_embedding_download,
+        replace_index=args.replace_index,
         batch_size=args.batch_size,
     )
 
@@ -299,6 +330,11 @@ def main() -> None:
         "--force-embedding-download",
         action="store_true",
         help="Re-download embedding model (fixes UNEXPECTED position_ids); overrides FORCE_EMBEDDING_DOWNLOAD",
+    )
+    parser.add_argument(
+        "--replace-index",
+        action="store_true",
+        help="Delete existing index and load fresh (no stale or duplicate data from previous runs)",
     )
     parser.add_argument(
         "--batch-size",
