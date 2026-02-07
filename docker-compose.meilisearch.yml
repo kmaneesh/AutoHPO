@@ -1,0 +1,19 @@
+# Meilisearch as a shared service. Run: docker compose -f docker-compose.meilisearch.yml up -d
+services:
+  meilisearch:
+    image: getmeili/meilisearch:v1.35.0
+    ports:
+      - "7700:7700"
+    environment:
+      MEILI_MASTER_KEY: ${MEILI_MASTER_KEY:-masterKey}
+      MEILI_ENV: development
+    volumes:
+      - meilisearch_data:/meili_data
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://localhost:7700/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+
+volumes:
+  meilisearch_data:
