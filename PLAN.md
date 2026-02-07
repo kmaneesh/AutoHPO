@@ -1,6 +1,6 @@
 # AutoHPO: RAG Stack (Agno + Meilisearch + HTMX/Tailwind/Alpine)
 
-Plan: agent always in the loop; minimal frontend with HTMX, Tailwind CSS, and Alpine.js (no Streamlit, no Node). Fallback to direct Meilisearch when the agent API is unreachable.
+Plan: agent always in the loop; minimal frontend with HTMX, Tailwind CSS, and Alpine.js (no Streamlit, no Node). Search funnel: agent → Meilisearch → regex on hp.json.
 
 ---
 
@@ -8,12 +8,13 @@ Plan: agent always in the loop; minimal frontend with HTMX, Tailwind CSS, and Al
 
 | ID | Task |
 |----|------|
-| **layout-docker** | Project layout (scripts/, data/, app/, static/) and Docker (Meilisearch + app container) |
-| **data-ingestion** | Scripts: download_hpo.py (fetch to data/), load_hpo.py (parse, embed, push to Meilisearch) |
-| **agent-tool** | Agent: Configure Agno agent with search_hpo tool and HPO system prompt |
-| **api-deploy** | API: Expose agent via Agno FastAPI; add fallback Meilisearch endpoint |
-| **frontend-htmx** | Frontend: HTMX + Tailwind + Alpine UI with agent-first, fallback to Meilisearch |
-| **readme** | README: Fix structure (headings, lists), add stack, data source, quick start |
+| **layout-docker** | Project layout (scripts/, data/, app/ with static/ and templates/), Docker |
+| **data-ingestion** | Scripts: download_hpo.py, load_hpo.py (parse, embed, push to Meilisearch) |
+| **agent-tool** | Full-fledged Agno agent (knowledge_agent-style) with HPO tool wrapping hpo.py |
+| **api-deploy** | web.py routes + main.py: agent, funnel, fallback, health, static/templates |
+| **frontend-htmx** | Frontend: HTMX + Tailwind + Alpine, agent-first, fallback to funnel |
+| **mcp-server** | MCP server (mcp_server.py) for LLM/MCP clients |
+| **readme** | README: structure, stack, data source, quick start |
 | **test-refine** | Testing: Relevance tuning and error handling |
 
 ---
@@ -23,26 +24,36 @@ Plan: agent always in the loop; minimal frontend with HTMX, Tailwind CSS, and Al
 ```
 AutoHPO/
   docker-compose.yml      # Meilisearch service + app service
-  Dockerfile             # App image: agent + API + frontend (and scripts for ingest)
+  Dockerfile             # App image: app/ (includes static + templates), scripts/
   .env.example
   requirements.txt
-  data/                  # Cached HPO data (e.g. hp.json); optional .gitignore
+  data/                  # Cached HPO data (hp.json); optional .gitignore
   scripts/
     download_hpo.py       # Download hp.json from PURL into data/
     load_hpo.py           # Parse obographs, embed terms, push to Meilisearch
   app/
     __init__.py
-    main.py               # FastAPI app: routes, static, agent + fallback endpoints
-    agent.py              # Agno agent + search_hpo tool
-    search.py             # Meilisearch client (used by agent tool and fallback)
-  static/                 # HTML/CSS/JS served by FastAPI
-    index.html
+    main.py               # Composes FastAPI app; mounts web routes, static, templates
+    web.py                # All FastAPI routes (/, /health, /api/chat, /api/search/*)
+    agent.py              # Full-fledged Agno agent (HPO tool, system message, history, db)
+    hpo.py                # Pure Meilisearch: single search_hpo(query, limit) only
+    search.py             # Funnel: try agent → Meilisearch (hpo) → regex on data/hp.json
+    mcp_server.py         # MCP server exposing search (and optionally agent) for LLM clients
+    static/               # HTML/CSS/JS served by FastAPI
+      index.html
+    templates/            # Server-rendered pages (e.g. Jinja2)
   PLAN.md
   README.md
 ```
 
-- **scripts/download_hpo.py**: Fetch `hp.json` from `http://purl.obolibrary.org/obo/hp.json`, save to `data/hp.json` (or configurable path). Idempotent; can skip if file exists or is recent.
-- **scripts/load_hpo.py**: Read `data/hp.json`, parse obographs (id, name, definition, synonyms), generate embeddings, create/update Meilisearch index and push documents. Expects Meilisearch URL (e.g. from env); can be run locally or inside the app container.
+- **app/hpo.py**: Pure Meilisearch. Single function `search_hpo(query, limit)`; no agent, no fallbacks. Used by the agent tool and by the funnel’s second layer.
+- **app/agent.py**: Full-fledged Agno agent (see [knowledge_agent](https://github.com/agno-agi/agno/blob/main/cookbook/01_showcase/01_agents/knowledge_agent/agent.py)): system message, tools=[HPO tool wrapping hpo.search_hpo], add_datetime_to_context, add_history_to_context, num_history_runs, read_chat_history, enable_agentic_memory, markdown, optional SqliteDb for chat history.
+- **app/search.py**: Funnel. (1) Try agent. (2) Fallback: Meilisearch via hpo.search_hpo. (3) Fallback: regex/search on data/hp.json only (obographs: id, name, definition, synonyms). Returns unified list of HPO term dicts (hpo_id, name, definition, synonyms_str).
+- **app/web.py**: All HTTP routes; no business logic—calls agent or search funnel.
+- **app/mcp_server.py**: MCP server so LLM clients can use HPO search (and optionally agent) as tools.
+- **app/main.py**: Creates app, includes web routes, mounts app/static and app/templates.
+- **scripts/download_hpo.py**: Fetch hp.json to data/; idempotent.
+- **scripts/load_hpo.py**: Parse obographs, embed, push to Meilisearch; expects MEILISEARCH_URL.
 
 ### Data sources (MVP Phase 1 vs Phase 2)
 
@@ -74,12 +85,21 @@ Example layout:
 - **Data source**: hp.json from `http://purl.obolibrary.org/obo/hp.json` for MVP.
 - **Fallback**: FastAPI endpoint (e.g. `POST /api/search/fallback`) queries Meilisearch and returns HTML fragment (HTMX) or JSON (Alpine). Same embedding for query vector as agent path.
 
-### Frontend (HTMX + Tailwind + Alpine)  
+### Dual endpoints (when Agno provides FastAPI)
 
-- **HTMX**: Search form POSTs to agent API (or fallback). Response is an HTML fragment; HTMX swaps it into a target `div`. No SPA.
+- **Our search**: `/`, `/api/chat`, `/api/search/fallback` (funnel), `/health`—served by web.py.
+- **Pure Agno API (future)**: When Agno ships a FastAPI app, mount it under a prefix (e.g. `app.mount("/agno", agno_fastapi_app)`) so power users and MCP can call the raw Agno API. One process, one port.
+
+### MCP server
+
+- **app/mcp_server.py**: Exposes HPO search (and optionally agent) as MCP tools so Cursor/other LLM clients can use AutoHPO (e.g. search_hpo, get_hpo_term). Can call the funnel or hpo.py directly; run as separate process (stdio or HTTP) or wired in main if MCP over HTTP.
+
+### Frontend (HTMX + Tailwind + Alpine)
+
+- **HTMX**: Search form POSTs to agent API (or funnel fallback). Response is an HTML fragment; HTMX swaps it into a target `div`. No SPA.
 - **Tailwind CSS**: Via CDN or minimal CLI. Layout, search bar, result cards, loading/error states.
 - **Alpine.js**: Loading state, "Using fallback search" banner when agent unreachable, optional debounce.
-- **Serving**: FastAPI serves the single HTML page. Same origin; agent and fallback on same backend.
+- **Serving**: FastAPI serves from app/static and app/templates. Same origin; agent and fallback on same backend.
 
 ---
 

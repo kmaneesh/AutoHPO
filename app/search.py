@@ -1,56 +1,96 @@
 """
-Meilisearch client for HPO index. Used by the agent tool and fallback endpoint.
+Search funnel: try Meilisearch (hpo) then fall back to regex search on data/hp.json.
+Returns a unified list of HPO term dicts (hpo_id, name, definition, synonyms_str).
+One job: orchestrate search fallbacks.
 """
 from __future__ import annotations
 
 import json
-import os
+import re
 from pathlib import Path
 
-try:
-    from dotenv import load_dotenv
-    load_dotenv(Path(__file__).resolve().parent.parent / ".env")
-except ImportError:
-    pass
+from app.hpo import search_hpo
 
-HPO_INDEX_UID = "hpo"
+# Project root and data path (hp.json)
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+_HP_JSON_PATH = _PROJECT_ROOT / "data" / "hp.json"
 
 
-def get_client():
-    """Build Meilisearch client from MEILISEARCH_URL and MEILI_MASTER_KEY."""
-    from meilisearch import Client as MeilisearchClient
-    url = (os.environ.get("MEILISEARCH_URL") or "").strip()
-    if not url:
-        raise ValueError("MEILISEARCH_URL is not set")
-    api_key = (os.environ.get("MEILI_MASTER_KEY") or "").strip() or None
-    return MeilisearchClient(url, api_key=api_key)
+def _curie_from_id(node_id: str) -> str:
+    """Convert OBO IRI to CURIE (e.g. http://.../HP_0000123 -> HP:0000123)."""
+    if not node_id:
+        return ""
+    if "://" in node_id:
+        part = node_id.split("/")[-1]
+        if "_" in part:
+            ns, rest = part.split("_", 1)
+            return f"{ns.upper()}:{rest}"
+        return part
+    return node_id.replace("_", ":", 1) if "_" in node_id else node_id
 
 
-def search_hpo(query: str, limit: int = 10) -> str:
+def _parse_obographs(path: Path) -> list[dict]:
+    """Parse obographs JSON to list of dicts with hpo_id, name, definition, synonyms_str."""
+    with open(path, encoding="utf-8") as f:
+        data = json.load(f)
+    out = []
+    for graph in data.get("graphs", []):
+        for node in graph.get("nodes", []):
+            node_id = node.get("id") or ""
+            curie = _curie_from_id(node_id)
+            name = (node.get("lbl") or "").strip()
+            meta = node.get("meta") or {}
+            defn = ""
+            if isinstance(meta.get("definition"), dict):
+                defn = (meta["definition"].get("val") or "").strip()
+            synonyms = []
+            for s in meta.get("synonyms", []):
+                if isinstance(s, dict) and s.get("val"):
+                    synonyms.append(str(s["val"]).strip())
+            synonyms_str = " | ".join(synonyms) if synonyms else ""
+            out.append({
+                "hpo_id": curie,
+                "name": name,
+                "definition": defn,
+                "synonyms_str": synonyms_str,
+            })
+    return out
+
+
+def regex_search_hp_json(query: str, limit: int = 10) -> list[dict]:
     """
-    Search the Human Phenotype Ontology (HPO) index by natural language or keyword.
-
-    Use this function whenever the user asks about phenotypes, clinical features,
-    symptoms, or HPO terms. Search by condition description, phenotype name, or HPO ID.
-
-    Args:
-        query: Search query (e.g. "atrial septal defect", "HP:0001631", "heart abnormality").
-        limit: Maximum number of HPO terms to return (default 10).
-
-    Returns:
-        JSON string of matching HPO terms with hpo_id, name, definition, synonyms_str.
+    Fallback: search data/hp.json with a simple regex/substring match on
+    hpo_id, name, definition, synonyms_str. Returns same shape as Meilisearch.
     """
-    client = get_client()
-    index = client.index(HPO_INDEX_UID)
-    response = index.search(query, {"limit": limit})
-    hits = response.get("hits") or []
-    out = [
-        {
-            "hpo_id": h.get("hpo_id"),
-            "name": h.get("name"),
-            "definition": (h.get("definition") or "")[:500],
-            "synonyms_str": h.get("synonyms_str") or "",
-        }
-        for h in hits
-    ]
-    return json.dumps(out, indent=2)
+    if not _HP_JSON_PATH.exists():
+        return []
+    terms = _parse_obographs(_HP_JSON_PATH)
+    q = (query or "").strip().lower()
+    if not q:
+        return terms[:limit]
+    pattern = re.compile(re.escape(q), re.IGNORECASE)
+    matched = []
+    for t in terms:
+        if (
+            pattern.search(t.get("hpo_id") or "")
+            or pattern.search(t.get("name") or "")
+            or pattern.search(t.get("definition") or "")
+            or pattern.search(t.get("synonyms_str") or "")
+        ):
+            matched.append(t)
+            if len(matched) >= limit:
+                break
+    return matched
+
+
+def search_funnel(query: str, limit: int = 15) -> list[dict]:
+    """
+    Funnel: (1) Meilisearch via hpo.search_hpo; (2) on failure, regex on data/hp.json.
+    Returns list of dicts with hpo_id, name, definition, synonyms_str.
+    """
+    try:
+        raw = search_hpo(query=query, limit=limit)
+        return json.loads(raw)
+    except Exception:
+        pass
+    return regex_search_hp_json(query=query, limit=limit)
