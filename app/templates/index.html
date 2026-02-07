@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AutoHPO</title>
+  <link rel="stylesheet" href="/static/css/site.css">
+  <link rel="stylesheet" href="/static/css/tailwind.css">
+</head>
+<body>
+  <h1>AutoHPO</h1>
+  <p class="muted">HPO term search from patient history or phenotype query.</p>
+
+  <form id="search-form" action="#" method="post">
+    <label for="query">Patient history</label>
+    <textarea id="query" name="query" rows="6" placeholder="Paste clinical note or enter phenotype query (e.g. atrial septal defect, HP:0001631)…"></textarea>
+    <button type="submit" id="search">Search</button>
+
+    <label for="mode" class="mode-label">Search mode</label>
+    <select id="mode" name="mode">
+      <option value="agent">Agent (natural language, uses LLM + HPO tools)</option>
+      <option value="pure">Pure search (bypass agent, HPO index only)</option>
+    </select>
+
+    <label class="mode-label"><input type="checkbox" id="debug" name="debug" /> Debug mode (show request &amp; response)</label>
+  </form>
+
+  <div id="result" aria-live="polite"></div>
+
+  <nav class="routes">
+    <strong>Routes</strong>
+    <ul>
+      <li><code>GET /</code> – This page</li>
+      <li><code>GET /health</code> – <a href="/health">Health check</a></li>
+      <li><code>GET /api/sse</code> – SSE for MCP</li>
+      <li><code>POST /api/chat</code> – Agent, fallback to search if LLM unavailable (body: <code>{"query": "..."}</code>)</li>
+      <li><code>POST /api/search</code> – Pure search (body: <code>{"query": "..."}</code>)</li>
+    </ul>
+  </nav>
+
+  <script src="/static/js/alpine.js" defer></script>
+  <script src="/static/js/app.js" defer></script>
+</body>
+</html>

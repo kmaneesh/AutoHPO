@@ -5,6 +5,10 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Pre-download sentence-transformers model for HPO embeddings (avoids download at runtime)
+ARG HPO_EMBEDDING_MODEL=all-MiniLM-L6-v2
+RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('${HPO_EMBEDDING_MODEL}')"
+
 COPY app/ ./app/
 COPY scripts/ ./scripts/
 COPY data/.gitkeep ./data/

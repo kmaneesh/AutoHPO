@@ -22,9 +22,9 @@ def health():
 
 @router.get("/")
 def index():
-    """Serve the main search page from static or templates."""
-    if STATIC_DIR and (STATIC_DIR / "index.html").exists():
-        return FileResponse(STATIC_DIR / "index.html")
+    """Serve the main search page from templates first, then static."""
     if TEMPLATES_DIR and (TEMPLATES_DIR / "index.html").exists():
         return FileResponse(TEMPLATES_DIR / "index.html")
-    return {"message": "AutoHPO API. Add app/static/index.html or app/templates/index.html for the UI."}
+    if STATIC_DIR and (STATIC_DIR / "index.html").exists():
+        return FileResponse(STATIC_DIR / "index.html")
+    return {"message": "AutoHPO API. Add app/templates/index.html or app/static/index.html for the UI."}

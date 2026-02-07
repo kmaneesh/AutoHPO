@@ -118,6 +118,14 @@ def get_agent():
     return _agent
 
 
+def init_app() -> None:
+    """
+    Initialise the agent singleton at app startup.
+    Call from FastAPI lifespan to avoid first-request load time.
+    """
+    get_agent()
+
+
 router = APIRouter()
 
 

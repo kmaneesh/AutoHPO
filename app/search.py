@@ -22,10 +22,11 @@ class SearchRequest(BaseModel):
 
 @router.post("/api/search")
 def api_search(body: SearchRequest):
-    """Pure HPO search: Meilisearch then regex on hp.json. Returns JSON list of HPO terms."""
+    """Pure HPO search: Meilisearch then regex on hp.json. Returns query_sent (after normalization) and results."""
     try:
+        query_sent = prepare_search_query(body.query)
         results = search_funnel(query=body.query, limit=15)
-        return {"results": results}
+        return {"query_sent": query_sent, "results": results}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
