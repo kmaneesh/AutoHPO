@@ -1,6 +1,7 @@
 """
 Pure Meilisearch HPO search and query normalization (stop words). Single place for all queries.
 Used by the agent tool and by the search funnel (second layer).
+Supports vector (semantic) search when embeddings are available (same model as load_hpo).
 """
 from __future__ import annotations
 
@@ -17,6 +18,52 @@ except ImportError:
     pass
 
 HPO_INDEX_UID = "hpo"
+
+# Vector search: from env with defaults (must match scripts/load_hpo.py and index settings)
+HPO_EMBEDDER_NAME = (os.environ.get("HPO_EMBEDDER_NAME") or "hpo-semantic").strip()
+HPO_EMBEDDING_DIMENSIONS = int(os.environ.get("HPO_EMBEDDING_DIMENSIONS", "384"))
+HPO_EMBEDDING_MODEL = (os.environ.get("HPO_EMBEDDING_MODEL") or "all-MiniLM-L6-v2").strip()
+
+# Initialised once at app startup (main lifespan)
+_client = None
+_embedding_model = None
+
+
+def init_app() -> None:
+    """
+    Initialise Meilisearch client and embedding model once at app startup.
+    Call from FastAPI lifespan so search avoids per-request load time.
+    Idempotent: safe to call multiple times.
+    """
+    global _client, _embedding_model
+    if _client is None:
+        from meilisearch import Client as MeilisearchClient
+        url = (os.environ.get("MEILISEARCH_URL") or "").strip()
+        if url:
+            api_key = (os.environ.get("MEILI_MASTER_KEY") or "").strip() or None
+            _client = MeilisearchClient(url, api_key=api_key)
+    if _embedding_model is None:
+        try:
+            from sentence_transformers import SentenceTransformer
+            _embedding_model = SentenceTransformer(HPO_EMBEDDING_MODEL)
+        except ImportError:
+            pass
+
+
+def _get_embedding_model():
+    """Return the app-initialised embedding model, or None if not installed."""
+    return _embedding_model
+
+
+def _embed_query(text: str) -> list[float] | None:
+    """Embed the query string with the HPO model. Returns None if model unavailable."""
+    if not (text or "").strip():
+        return None
+    model = _get_embedding_model()
+    if model is None:
+        return None
+    vec = model.encode(text.strip(), convert_to_numpy=True)
+    return vec.tolist()
 
 # Default English stop words for clinical/phenotype queries (App-level, Option A).
 # Extend via env or config if needed (e.g. HPO_STOP_WORDS="word1,word2").
@@ -66,19 +113,21 @@ def prepare_search_query(query: str) -> str:
 
 
 def get_client():
-    """Build Meilisearch client from MEILISEARCH_URL and MEILI_MASTER_KEY."""
-    from meilisearch import Client as MeilisearchClient
-    url = (os.environ.get("MEILISEARCH_URL") or "").strip()
-    if not url:
+    """Return the Meilisearch client (initialised at app startup or on first use)."""
+    global _client
+    if _client is None:
+        init_app()
+    if _client is None:
         raise ValueError("MEILISEARCH_URL is not set")
-    api_key = (os.environ.get("MEILI_MASTER_KEY") or "").strip() or None
-    return MeilisearchClient(url, api_key=api_key)
+    return _client
 
 
 def search_hpo(query: str, limit: int = 10) -> str:
     """
-    Search the Human Phenotype Ontology (HPO) index via Meilisearch only.
-    Query is normalized (stop words removed) before search. No agent, no fallbacks.
+    Search the Human Phenotype Ontology (HPO) index via Meilisearch.
+    Query is normalized (stop words removed) before search.
+    When embeddings are available, uses hybrid search (full-text + vector).
+    No agent, no fallbacks.
 
     Args:
         query: Search query (e.g. "atrial septal defect", "HP:0001631").
@@ -88,9 +137,18 @@ def search_hpo(query: str, limit: int = 10) -> str:
         JSON string of list of dicts with hpo_id, name, definition, synonyms_str.
     """
     q = prepare_search_query(query)
+    # Use original query if empty after stop-word removal (e.g. "the and or")
+    search_q = q if q else query.strip()
     client = get_client()
     index = client.index(HPO_INDEX_UID)
-    response = index.search(q, {"limit": limit})
+
+    search_params: dict = {"limit": limit}
+    query_vector = _embed_query(search_q) if search_q else None
+    if query_vector is not None:
+        search_params["vector"] = query_vector
+        search_params["hybrid"] = {"embedder": HPO_EMBEDDER_NAME}
+
+    response = index.search(search_q, search_params)
     hits = response.get("hits") or []
     out = [
         {
