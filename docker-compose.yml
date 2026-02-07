@@ -9,10 +9,11 @@ services:
     volumes:
       - meilisearch_data:/meili_data
     healthcheck:
-      test: ["CMD", "wget", "-q", "-O", "-", "http://localhost:7700/health"]
+      test: ["CMD", "curl", "-f", "http://localhost:7700/health"]
       interval: 5s
-      timeout: 3s
-      retries: 3
+      timeout: 5s
+      retries: 6
+      start_period: 10s
 
   app:
     build: .
