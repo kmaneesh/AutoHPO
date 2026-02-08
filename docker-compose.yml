@@ -2,7 +2,7 @@ services:
   meilisearch:
     image: getmeili/meilisearch:v1.35.0
     ports:
-      - "7700:7700"
+      - "127.0.0.1:7700:7700"
     environment:
       MEILI_MASTER_KEY: ${MEILI_MASTER_KEY:-masterKey}
       MEILI_ENV: development
@@ -22,7 +22,7 @@ services:
     ports:
       - "8000:8000"
     environment:
-      MEILISEARCH_URL: ${MEILISEARCH_URL:-http://meilisearch:7700}
+      MEILISEARCH_URL: http://meilisearch:7700
       MEILI_MASTER_KEY: ${MEILI_MASTER_KEY:-masterKey}
     extra_hosts:
       - "host.docker.internal:host-gateway"

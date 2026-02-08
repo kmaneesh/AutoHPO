@@ -57,7 +57,7 @@
         debug.response = { status: res.status, body: data };
         if (!res.ok) {
           searchResultEl.innerHTML = '<p class="error">Error: ' + escapeHtml(data.detail || res.statusText) + '</p>';
-          if (debugCheckbox && debugCheckbox.checked) searchResultEl.innerHTML += renderDebugBlock(debug);
+          storeDebug(debug);
           return;
         }
         const list = data.results || [];
@@ -72,15 +72,13 @@
               (t.definition ? '<br><small>' + escapeHtml((t.definition || '').slice(0, 120)) + '…</small>' : '') + '</li>';
           }).join('') + '</ul>';
         }
-        if (debugCheckbox && debugCheckbox.checked) updateDebugSidebar(debug);
+        storeDebug(debug);
         searchResultEl.innerHTML = html;
       })
       .catch(function (e) {
         searchResultEl.innerHTML = '<p class="error">Error: ' + escapeHtml(e.message) + '</p>';
-        if (debugCheckbox && debugCheckbox.checked) {
-          debug.response = { status: '—', body: { error: e.message } };
-          updateDebugSidebar(debug);
-        }
+        debug.response = { status: '—', body: { error: e.message } };
+        storeDebug(debug);
       });
   }
 
@@ -98,31 +96,24 @@
   var debugSidebarEl = document.getElementById('debug-sidebar');
   var debugDetailsEl = document.getElementById('debug-details');
 
-  function updateDebugSidebar(debug) {
-    if (!debugContentEl || !debugSidebarEl) return;
-    if (debug && debugCheckbox && debugCheckbox.checked) {
-      const req = debug.request || {};
-      const res = debug.response || {};
-      const reqBody = typeof req.body === 'string' ? req.body : JSON.stringify(req.body, null, 2);
-      const resBody = typeof res.body === 'object' ? JSON.stringify(res.body, null, 2) : String(res.body);
-      debugContentEl.innerHTML = '<strong>Request</strong>\n' + escapeHtml(reqBody) + '\n\n<strong>Response</strong>\n' + escapeHtml(resBody);
-      debugSidebarEl.classList.add('open');
-      if (debugDetailsEl) debugDetailsEl.setAttribute('open', '');
-    } else {
-      debugContentEl.innerHTML = '';
-      if (!debugCheckbox || !debugCheckbox.checked) debugSidebarEl.classList.remove('open');
-    }
+  // Always store latest debug data; render into sidebar content regardless of toggle state
+  var _lastDebug = null;
+
+  function storeDebug(debug) {
+    if (!debug || !debugContentEl) return;
+    _lastDebug = debug;
+    var req = debug.request || {};
+    var res = debug.response || {};
+    var reqBody = typeof req.body === 'string' ? req.body : JSON.stringify(req.body, null, 2);
+    var resBody = typeof res.body === 'object' ? JSON.stringify(res.body, null, 2) : String(res.body);
+    debugContentEl.innerHTML = '<strong>Request</strong>\n' + escapeHtml(reqBody) + '\n\n<strong>Response</strong>\n' + escapeHtml(resBody);
   }
 
   debugToggleBtn.addEventListener('click', function () {
     debugCheckbox.checked = !debugCheckbox.checked;
     debugToggleBtn.classList.toggle('active', debugCheckbox.checked);
-    if (debugCheckbox.checked) {
-      debugSidebarEl.classList.add('open');
-      if (debugDetailsEl) debugDetailsEl.setAttribute('open', '');
-    } else {
-      debugSidebarEl.classList.remove('open');
-    }
+    debugSidebarEl.classList.toggle('open', debugCheckbox.checked);
+    if (debugCheckbox.checked && debugDetailsEl) debugDetailsEl.setAttribute('open', '');
   });
 
   function parseMarkdownTable(text) {
@@ -184,30 +175,7 @@
 
   var chatRequestInFlight = false;
 
-  function renderSearchDebug(apiDebug) {
-    if (!apiDebug) return '';
-    var html = '<details class="search-debug"><summary>Search debug (' + (apiDebug.parsed_terms || []).length + ' terms)</summary>';
-    html += '<p><strong>Parsed terms:</strong> ' + escapeHtml(JSON.stringify(apiDebug.parsed_terms)) + '</p>';
-    var searches = apiDebug.term_searches || [];
-    for (var i = 0; i < searches.length; i++) {
-      var s = searches[i];
-      html += '<div class="debug-term">';
-      html += '<strong>' + escapeHtml(s.term) + '</strong>';
-      html += ' → query_sent: <code>' + escapeHtml(s.query_sent || '') + '</code>';
-      html += ' | hits: <strong>' + (s.hit_count || 0) + '</strong>';
-      if (s.error) html += ' | <span class="error">ERROR: ' + escapeHtml(s.error) + '</span>';
-      if (s.raw_first_hit_keys && s.raw_first_hit_keys.length) {
-        html += ' | hit keys: <code>' + escapeHtml(s.raw_first_hit_keys.join(', ')) + '</code>';
-      }
-      if (s.search_params) html += ' | params: <code>' + escapeHtml(JSON.stringify(s.search_params)) + '</code>';
-      if (s.top_result) html += '<br>top: <code>' + escapeHtml(JSON.stringify(s.top_result)) + '</code>';
-      html += '</div>';
-    }
-    html += '</details>';
-    return html;
-  }
-
-  function appendChatMessage(role, text, debug, resultsFromApi, apiDebug) {
+  function appendChatMessage(role, text, debug, resultsFromApi) {
     var wrap = document.createElement('div');
     wrap.className = 'chat-msg chat-msg-' + role;
     var content = '';
@@ -220,24 +188,20 @@
         content = tableHtml || (text || '').replace(/\n/g, '<br>');
       }
       if (!content) content = (text || '').replace(/\n/g, '<br>');
-      // Append inline search debug when checkbox is on
-      if (debugCheckbox && debugCheckbox.checked && apiDebug) {
-        content += renderSearchDebug(apiDebug);
-      }
     } else {
       content = (text || '').replace(/\n/g, '<br>');
     }
     wrap.innerHTML = '<div class="chat-bubble">' + content + '</div>';
     chatHistoryEl.appendChild(wrap);
     chatHistoryEl.scrollTop = chatHistoryEl.scrollHeight;
-    if (debug) updateDebugSidebar(debug);
+    if (debug) storeDebug(debug);
   }
 
   function showChatSpinner() {
     const wrap = document.createElement('div');
     wrap.id = 'chat-spinner-wrap';
     wrap.className = 'chat-msg chat-msg-agent chat-msg-loading';
-    wrap.innerHTML = '<div class="chat-bubble"><span class="spinner" aria-hidden="true"></span> Agent is thinking…</div>';
+    wrap.innerHTML = '<div class="chat-bubble"><span class="spinner" aria-hidden="true"></span> AutoHPO is thinking…</div>';
     chatHistoryEl.appendChild(wrap);
     chatHistoryEl.scrollTop = chatHistoryEl.scrollHeight;
   }
@@ -283,8 +247,7 @@
         debug.response = { status: res.status, body: data };
         const responseText = data.response != null ? String(data.response) : '';
         const resultsFromApi = data.results || null;
-        const apiDebug = data.debug || null;
-        appendChatMessage('agent', responseText, debug, resultsFromApi, apiDebug);
+        appendChatMessage('agent', responseText, debug, resultsFromApi);
       })
       .catch(function (e) {
         clearTimeout(timeoutId);

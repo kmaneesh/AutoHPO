@@ -35,7 +35,6 @@ HPO_INDEX_UID = "hpo"
 SEARCHABLE_ATTRIBUTES = ["hpo_id", "name", "definition", "synonyms_str"]
 
 # From env with defaults (must match app.hpo and index embedder settings)
-HPO_EMBEDDER_NAME = (os.environ.get("HPO_EMBEDDER_NAME") or "hpo-semantic").strip()
 HPO_EMBEDDING_DIMENSIONS = int(os.environ.get("HPO_EMBEDDING_DIMENSIONS", "384"))
 HPO_EMBEDDING_MODEL = (os.environ.get("HPO_EMBEDDING_MODEL") or "all-MiniLM-L6-v2").strip()
 
@@ -74,6 +73,7 @@ def parse_obographs(path: Path) -> list[dict]:
                     synonyms.append(str(s["val"]).strip())
             synonyms_str = " | ".join(synonyms) if synonyms else ""
             out.append({
+                "id": curie.replace(":", "_"),
                 "hpo_id": curie,
                 "name": name,
                 "definition": defn,
@@ -124,26 +124,50 @@ def load_hpo(
                 t["_embedding"] = vec.tolist()
 
     client = MeilisearchClient(meilisearch_url, api_key=api_key or None)
+
+    def _wait(task_result):
+        """Wait for a Meilisearch async task and check status."""
+        # SDK may return a dict (old) or TaskInfo object (new)
+        if isinstance(task_result, dict):
+            uid = task_result.get("taskUid")
+        else:
+            uid = getattr(task_result, "task_uid", None)
+        if uid is None:
+            return task_result
+        info = client.wait_for_task(uid)
+        status = info.get("status") if isinstance(info, dict) else getattr(info, "status", None)
+        if status and status not in ("succeeded", "enqueued", "processing"):
+            err = info.get("error") if isinstance(info, dict) else getattr(info, "error", None)
+            print(f"  Task {uid} {status}: {err}", file=sys.stderr)
+        return info
+
+    # Drop and recreate index when REPLACE_INDEX is set
+    replace = os.environ.get("REPLACE_INDEX", "").strip().lower() in ("true", "1", "yes")
+    if replace:
+        try:
+            _wait(client.delete_index(index_uid))
+            print(f"Deleted existing index '{index_uid}' (REPLACE_INDEX=true).")
+        except Exception:
+            pass
     try:
         client.get_index(index_uid)
     except Exception:
-        client.create_index(index_uid, {"primaryKey": "hpo_id"})
+        _wait(client.create_index(index_uid, {"primaryKey": "id"}))
+        print(f"Created index '{index_uid}'.")
     idx = client.index(index_uid)
-    idx.update_searchable_attributes(SEARCHABLE_ATTRIBUTES)
+    _wait(idx.update_searchable_attributes(SEARCHABLE_ATTRIBUTES))
 
     # Configure user-provided embedder for vector search (must match document _vectors key)
     if embed:
-        task = idx.update_settings({
+        _wait(idx.update_settings({
             "embedders": {
-                HPO_EMBEDDER_NAME: {
+                HPO_EMBEDDING_MODEL: {
                     "source": "userProvided",
                     "dimensions": HPO_EMBEDDING_DIMENSIONS,
                 }
             }
-        })
-        # Wait for embedder config so documents with _vectors are accepted
-        if hasattr(client, "wait_for_task") and isinstance(task, dict) and task.get("taskUid") is not None:
-            client.wait_for_task(task["taskUid"])
+        }))
+        print(f"Embedder '{HPO_EMBEDDING_MODEL}' configured ({HPO_EMBEDDING_DIMENSIONS} dims).")
 
     # Meilisearch expects primary key in each document; use hpo_id as unique id.
     # Vector search uses _vectors[embedder_name], not _embedding.
@@ -151,13 +175,13 @@ def load_hpo(
     for t in terms:
         doc = {"hpo_id": t["hpo_id"], "name": t["name"], "definition": t["definition"], "synonyms_str": t["synonyms_str"]}
         if embed and "_embedding" in t:
-            doc["_vectors"] = {HPO_EMBEDDER_NAME: t["_embedding"]}
+            doc["_vectors"] = {HPO_EMBEDDING_MODEL: t["_embedding"]}
         documents.append(doc)
 
     print(f"Indexing {len(documents)} documents (batch_size={batch_size}) ...")
     for i in range(0, len(documents), batch_size):
         batch = documents[i : i + batch_size]
-        idx.add_documents(batch)
+        _wait(idx.add_documents(batch))
         print(f"  {min(i + batch_size, len(documents))}/{len(documents)}")
     print("Done.")
 

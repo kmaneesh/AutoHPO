@@ -22,29 +22,62 @@ except ImportError:
 HPO_INDEX_UID = "hpo"
 
 # Vector search: from env with defaults (must match scripts/load_hpo.py and index settings)
-HPO_EMBEDDER_NAME = (os.environ.get("HPO_EMBEDDER_NAME") or "hpo-semantic").strip()
 HPO_EMBEDDING_DIMENSIONS = int(os.environ.get("HPO_EMBEDDING_DIMENSIONS", "384"))
 HPO_EMBEDDING_MODEL = (os.environ.get("HPO_EMBEDDING_MODEL") or "all-MiniLM-L6-v2").strip()
 
 # Initialised once at app startup (main lifespan)
 _client = None
+_index = None  # cached Index object (avoids recreating per call)
 _embedding_model = None
+
+
+def _configure_session(client) -> None:
+    """Mount retry + connection-pool adapter on the client's requests.Session."""
+    try:
+        from requests.adapters import HTTPAdapter
+        from urllib3.util.retry import Retry
+
+        retry = Retry(
+            total=3,
+            backoff_factor=0.3,
+            status_forcelist=[502, 503, 504],
+            allowed_methods=["GET", "POST"],
+        )
+        adapter = HTTPAdapter(
+            max_retries=retry,
+            pool_connections=4,
+            pool_maxsize=10,
+        )
+        # The meilisearch SDK stores the session at client.http.session (HttpRequests)
+        session = client.http.session
+        session.mount("http://", adapter)
+        session.mount("https://", adapter)
+        logger.info("Meilisearch session configured: retry=3, pool_connections=4, pool_maxsize=10")
+    except Exception as exc:
+        logger.warning("Could not configure Meilisearch session adapter: %s", exc)
 
 
 def init_app() -> None:
     """
-    Initialise Meilisearch client and embedding model once at app startup.
-    Call from FastAPI lifespan so search avoids per-request load time.
-    Idempotent: safe to call multiple times.
+    Initialise Meilisearch client (with persistent session + retry), cached index,
+    and embedding model once at app startup. Idempotent.
     """
-    global _client, _embedding_model
+    global _client, _index, _embedding_model
     if _client is None:
         from meilisearch import Client as MeilisearchClient
         url = (os.environ.get("MEILISEARCH_URL") or "").strip()
         if url:
             api_key = (os.environ.get("MEILI_MASTER_KEY") or "").strip() or None
             _client = MeilisearchClient(url, api_key=api_key)
-            logger.info("Meilisearch client initialised: %s", url)
+            _configure_session(_client)
+            # Cache the index object (just a reference, no network call)
+            _index = _client.index(HPO_INDEX_UID)
+            # Health check: verify Meilisearch is reachable
+            try:
+                health = _client.health()
+                logger.info("Meilisearch health OK: %s — %s", url, health)
+            except Exception as exc:
+                logger.error("Meilisearch health check FAILED at %s: %s", url, exc)
         else:
             logger.warning("MEILISEARCH_URL not set — Meilisearch search will fail")
     if _embedding_model is None:
@@ -92,6 +125,14 @@ def get_client():
     return _client
 
 
+def get_index():
+    """Return the cached HPO index object. Avoids recreating per call."""
+    global _index
+    if _index is None:
+        _index = get_client().index(HPO_INDEX_UID)
+    return _index
+
+
 def search_hpo(query: str, limit: int = 10) -> str:
     """
     Search the Human Phenotype Ontology (HPO) index via Meilisearch.
@@ -108,14 +149,13 @@ def search_hpo(query: str, limit: int = 10) -> str:
     """
     q = prepare_search_query(query)
     search_q = q if q else query.strip()
-    client = get_client()
-    index = client.index(HPO_INDEX_UID)
+    index = get_index()
 
     search_params: dict = {"limit": limit}
     query_vector = _embed_query(search_q) if search_q else None
     if query_vector is not None:
         search_params["vector"] = query_vector
-        search_params["hybrid"] = {"embedder": HPO_EMBEDDER_NAME}
+        search_params["hybrid"] = {"embedder": HPO_EMBEDDING_MODEL}
 
     response = index.search(search_q, search_params)
     hits = response.get("hits") or []
@@ -144,15 +184,14 @@ def search_hpo_results(query: str, limit: int = 5) -> tuple[list[dict], dict]:
         debug["error"] = "empty query after normalization"
         return [], debug
     try:
-        client = get_client()
-        index = client.index(HPO_INDEX_UID)
+        index = get_index()
         search_params: dict = {"limit": limit}
         query_vector = _embed_query(search_q)
         if query_vector is not None:
             search_params["vector"] = f"[{len(query_vector)} dims]"
-            search_params["hybrid"] = {"embedder": HPO_EMBEDDER_NAME}
+            search_params["hybrid"] = {"embedder": HPO_EMBEDDING_MODEL}
             # actual params for the call (vector is full list)
-            actual_params: dict = {"limit": limit, "vector": query_vector, "hybrid": {"embedder": HPO_EMBEDDER_NAME}}
+            actual_params: dict = {"limit": limit, "vector": query_vector, "hybrid": {"embedder": HPO_EMBEDDING_MODEL}}
         else:
             actual_params = search_params
             debug["vector"] = "no embedding model"
@@ -186,11 +225,11 @@ def get_term_by_id(term_id: str) -> dict | None:
     """
     if not (term_id or "").strip():
         return None
-    q = term_id.strip().replace("_", ":", 1) if "_" in term_id else term_id.strip()
+    # Primary key is "id" with underscore format (HP_0001631)
+    doc_id = term_id.strip().replace(":", "_", 1) if ":" in term_id else term_id.strip()
     try:
-        client = get_client()
-        index = client.index(HPO_INDEX_UID)
-        doc = index.get_document(q)
+        index = get_index()
+        doc = index.get_document(doc_id)
         if not doc:
             return None
         return {
