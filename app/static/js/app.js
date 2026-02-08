@@ -156,18 +156,28 @@
   function renderResultsFromApi(results) {
     if (!results || !results.length) return null;
     var html = '<table class="extract-table"><thead><tr>';
-    html += '<th class="col-term">Medical term</th><th class="col-hpo-id">HPO ID</th><th class="col-name">HPO Name</th><th class="col-def">HPO Definition</th></tr></thead><tbody>';
+    html += '<th class="col-term">Medical term</th><th class="col-hpo-id">HPO ID</th><th class="col-name">HPO name</th><th class="col-def">HPO definition</th></tr></thead><tbody>';
     for (var i = 0; i < results.length; i++) {
-      var r = results[i];
-      var term = r.medical_term || '';
-      var id = r.hpo_id || '—';
-      var name = r.hpo_name || '—';
-      var def = (r.hpo_definition || '').slice(0, 200);
-      if (def.length === 200) def += '…';
-      html += '<tr><td class="col-term">' + escapeHtml(term) + '</td>';
-      html += '<td class="col-hpo-id"><span class="hpo-id">' + escapeHtml(id) + '</span></td>';
-      html += '<td class="col-name">' + escapeHtml(name) + '</td>';
-      html += '<td class="col-def">' + escapeHtml(def || '—') + '</td></tr>';
+      var row = results[i];
+      var term = row.term || '';
+      var hpoResults = row.hpo_results || [];
+      var idsHtml = '';
+      var namesHtml = '';
+      var defsHtml = '';
+      for (var j = 0; j < hpoResults.length; j++) {
+        var r = hpoResults[j];
+        var id = r.hpo_id || '—';
+        var name = r.name || '—';
+        var def = (r.definition || '').slice(0, 200);
+        if (def.length === 200) def += '…';
+        idsHtml += '<div class="hpo-result-row"><span class="hpo-id">' + escapeHtml(id) + '</span></div>';
+        namesHtml += '<div class="hpo-result-row">' + escapeHtml(name) + '</div>';
+        defsHtml += '<div class="hpo-result-row">' + escapeHtml(def || '—') + '</div>';
+      }
+      if (!idsHtml) idsHtml = '—';
+      if (!namesHtml) namesHtml = '—';
+      if (!defsHtml) defsHtml = '—';
+      html += '<tr><td class="col-term">' + escapeHtml(term) + '</td><td class="col-hpo-id">' + idsHtml + '</td><td class="col-name">' + namesHtml + '</td><td class="col-def">' + defsHtml + '</td></tr>';
     }
     html += '</tbody></table>';
     return html;
@@ -175,13 +185,13 @@
 
   var chatRequestInFlight = false;
 
-  function appendChatMessage(role, text, debug, resultsFromApi) {
+  function appendChatMessage(role, text, debug, tableFromApi) {
     var wrap = document.createElement('div');
     wrap.className = 'chat-msg chat-msg-' + role;
     var content = '';
     if (role === 'agent') {
-      if (resultsFromApi && resultsFromApi.length) {
-        content = renderResultsFromApi(resultsFromApi);
+      if (tableFromApi && tableFromApi.length) {
+        content = renderResultsFromApi(tableFromApi);
       }
       if (!content && text) {
         var tableHtml = renderAgentResponseAsTable(text);
@@ -246,8 +256,8 @@
         const data = _.data;
         debug.response = { status: res.status, body: data };
         const responseText = data.response != null ? String(data.response) : '';
-        const resultsFromApi = data.results || null;
-        appendChatMessage('agent', responseText, debug, resultsFromApi);
+        const tableFromApi = data.table || null;
+        appendChatMessage('agent', responseText, debug, tableFromApi);
       })
       .catch(function (e) {
         clearTimeout(timeoutId);

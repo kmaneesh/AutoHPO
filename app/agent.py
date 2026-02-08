@@ -16,6 +16,7 @@ except ImportError:
     pass
 
 import re
+from typing import Any
 
 from fastapi import APIRouter
 from pydantic import BaseModel
@@ -58,6 +59,7 @@ class ChatDebug(BaseModel):
 class ChatResponse(BaseModel):
     response: str
     results: list[HPOMatch] | None = None
+    table: list[dict[str, Any]] | None = None
     debug: ChatDebug | None = None
 
 
@@ -259,6 +261,44 @@ def _build_hpo_matches(terms: list[str]) -> tuple[list[HPOMatch], list[TermDebug
     return matches, term_debugs
 
 
+def _build_table_with_hpo(terms: list[str]) -> tuple[list[dict[str, Any]], list[TermDebug]]:
+    """For each term, run hybrid search and return all results in table format."""
+    table: list[dict[str, Any]] = []
+    term_debugs: list[TermDebug] = []
+    for term in terms:
+        results, search_debug = hpo.search_hpo_results(term, limit=HPO_RESULTS_PER_TERM)
+        td = TermDebug(
+            term=term,
+            query_sent=search_debug.get("query_sent", ""),
+            hit_count=search_debug.get("hit_count", 0),
+            search_params=search_debug.get("search_params"),
+            raw_first_hit_keys=search_debug.get("raw_first_hit_keys"),
+            error=search_debug.get("error"),
+        )
+        if results:
+            td.top_result = results[0]
+        term_debugs.append(td)
+        
+        # Format all results for this term
+        hpo_results = []
+        for r in results:
+            hpo_results.append({
+                "hpo_id": r.get("hpo_id", ""),
+                "name": r.get("name", ""),
+                "definition": r.get("definition", ""),
+                "score": r.get("score", 0.0),
+            })
+        
+        table.append({
+            "term": term,
+            "hpo_results": hpo_results
+        })
+        
+        logger.info("Term %r → %d hits, top=%s, error=%s", term, td.hit_count, td.top_result, td.error)
+    
+    return table, term_debugs
+
+
 def init_app() -> None:
     """
     Initialise the agent singleton at app startup.
@@ -272,7 +312,7 @@ router = APIRouter()
 
 @router.post("/api/chat", response_model=ChatResponse)
 def api_chat(body: ChatRequest):
-    """Run the HPO agent; parse extracted terms, run hybrid search per term (top-1), return response + flat results."""
+    """Run the HPO agent; parse extracted terms, run hybrid search per term (all results), return response + table."""
     try:
         agent = get_agent()
         run = agent.run(body.query)
@@ -281,12 +321,12 @@ def api_chat(body: ChatRequest):
         terms = _parse_terms(response_text)
         logger.info("Parsed %d terms from agent: %s", len(terms), terms)
         if terms:
-            matches, term_debugs = _build_hpo_matches(terms)
+            table, term_debugs = _build_table_with_hpo(terms)
             debug = ChatDebug(parsed_terms=terms, agent_raw=response_text, term_searches=term_debugs)
         else:
-            matches = None
+            table = None
             debug = ChatDebug(parsed_terms=[], agent_raw=response_text, term_searches=[])
-        return ChatResponse(response=response_text, results=matches, debug=debug)
+        return ChatResponse(response=response_text, table=table, debug=debug)
     except Exception as exc:
         logger.error("api_chat FAILED: %s", exc, exc_info=True)
-        return ChatResponse(response="Agent not available. Try normal search.", results=None)
+        return ChatResponse(response="Agent not available. Try normal search.", table=None)
