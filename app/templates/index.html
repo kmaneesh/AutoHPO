@@ -41,15 +41,15 @@
     </div>
 
     <aside class="debug-sidebar" id="debug-sidebar">
-      <div class="debug-header">
-        <label class="debug-label"><input type="checkbox" id="debug" name="debug" /> Debug</label>
-      </div>
       <details class="debug-details" id="debug-details">
         <summary>Request / response</summary>
         <div id="debug-content" class="debug-content"></div>
       </details>
     </aside>
   </div>
+
+  <button type="button" class="debug-toggle" id="debug-toggle" title="Toggle debug panel">{}</button>
+  <input type="checkbox" id="debug" name="debug" class="sr-only" />
 
   <script src="/static/js/alpine.js" defer></script>
   <script src="/static/js/app.js" defer></script>

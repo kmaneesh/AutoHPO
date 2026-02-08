@@ -7,8 +7,11 @@ No stop-word removal: medical/clinical phrasing is preserved for semantic meanin
 from __future__ import annotations
 
 import json
+import logging
 import os
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 try:
     from dotenv import load_dotenv
@@ -41,12 +44,16 @@ def init_app() -> None:
         if url:
             api_key = (os.environ.get("MEILI_MASTER_KEY") or "").strip() or None
             _client = MeilisearchClient(url, api_key=api_key)
+            logger.info("Meilisearch client initialised: %s", url)
+        else:
+            logger.warning("MEILISEARCH_URL not set — Meilisearch search will fail")
     if _embedding_model is None:
         try:
             from sentence_transformers import SentenceTransformer
             _embedding_model = SentenceTransformer(HPO_EMBEDDING_MODEL)
+            logger.info("Embedding model loaded: %s", HPO_EMBEDDING_MODEL)
         except ImportError:
-            pass
+            logger.warning("sentence-transformers not installed — vector search disabled")
 
 
 def _get_embedding_model():
@@ -124,27 +131,39 @@ def search_hpo(query: str, limit: int = 10) -> str:
     return json.dumps(out, indent=2)
 
 
-def search_hpo_results(query: str, limit: int = 5) -> list[dict]:
+def search_hpo_results(query: str, limit: int = 5) -> tuple[list[dict], dict]:
     """
-    Hybrid search (full-text + vector) over HPO index; returns list of dicts.
-    Used for mapping extracted terms to HPO (e.g. 5 results per term).
-    Returns up to `limit` items with hpo_id, name, definition, synonyms_str.
+    Hybrid search (full-text + vector) over HPO index; returns (results, debug_info).
+    debug_info contains query_sent, search_params, hit_count, raw_keys, and any error.
     """
+    debug: dict = {"query_raw": query, "query_sent": "", "search_params": {}, "hit_count": 0, "raw_first_hit_keys": [], "error": None}
     q = prepare_search_query(query)
     search_q = q if q else query.strip()
+    debug["query_sent"] = search_q
     if not search_q:
-        return []
+        debug["error"] = "empty query after normalization"
+        return [], debug
     try:
         client = get_client()
         index = client.index(HPO_INDEX_UID)
         search_params: dict = {"limit": limit}
         query_vector = _embed_query(search_q)
         if query_vector is not None:
-            search_params["vector"] = query_vector
+            search_params["vector"] = f"[{len(query_vector)} dims]"
             search_params["hybrid"] = {"embedder": HPO_EMBEDDER_NAME}
-        response = index.search(search_q, search_params)
+            # actual params for the call (vector is full list)
+            actual_params: dict = {"limit": limit, "vector": query_vector, "hybrid": {"embedder": HPO_EMBEDDER_NAME}}
+        else:
+            actual_params = search_params
+            debug["vector"] = "no embedding model"
+        debug["search_params"] = search_params
+        response = index.search(search_q, actual_params)
         hits = response.get("hits") or []
-        return [
+        debug["hit_count"] = len(hits)
+        if hits:
+            debug["raw_first_hit_keys"] = list(hits[0].keys())
+        logger.info("search_hpo_results(%r) → %d hits", search_q, len(hits))
+        results = [
             {
                 "hpo_id": h.get("hpo_id"),
                 "name": h.get("name"),
@@ -153,8 +172,11 @@ def search_hpo_results(query: str, limit: int = 5) -> list[dict]:
             }
             for h in hits
         ]
-    except Exception:
-        return []
+        return results, debug
+    except Exception as exc:
+        logger.error("search_hpo_results(%r) FAILED: %s", search_q, exc, exc_info=True)
+        debug["error"] = str(exc)
+        return [], debug
 
 
 def get_term_by_id(term_id: str) -> dict | None:

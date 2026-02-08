@@ -15,6 +15,7 @@
   const chatQueryInput = document.getElementById('chat-query');
   const chatHistoryEl = document.getElementById('chat-history');
   const debugCheckbox = document.getElementById('debug');
+  const debugToggleBtn = document.getElementById('debug-toggle');
 
   function escapeHtml(s) {
     const div = document.createElement('div');
@@ -113,8 +114,15 @@
     }
   }
 
-  debugCheckbox.addEventListener('change', function () {
-    if (!debugCheckbox.checked) debugSidebarEl.classList.remove('open');
+  debugToggleBtn.addEventListener('click', function () {
+    debugCheckbox.checked = !debugCheckbox.checked;
+    debugToggleBtn.classList.toggle('active', debugCheckbox.checked);
+    if (debugCheckbox.checked) {
+      debugSidebarEl.classList.add('open');
+      if (debugDetailsEl) debugDetailsEl.setAttribute('open', '');
+    } else {
+      debugSidebarEl.classList.remove('open');
+    }
   });
 
   function parseMarkdownTable(text) {
@@ -176,7 +184,30 @@
 
   var chatRequestInFlight = false;
 
-  function appendChatMessage(role, text, debug, resultsFromApi) {
+  function renderSearchDebug(apiDebug) {
+    if (!apiDebug) return '';
+    var html = '<details class="search-debug"><summary>Search debug (' + (apiDebug.parsed_terms || []).length + ' terms)</summary>';
+    html += '<p><strong>Parsed terms:</strong> ' + escapeHtml(JSON.stringify(apiDebug.parsed_terms)) + '</p>';
+    var searches = apiDebug.term_searches || [];
+    for (var i = 0; i < searches.length; i++) {
+      var s = searches[i];
+      html += '<div class="debug-term">';
+      html += '<strong>' + escapeHtml(s.term) + '</strong>';
+      html += ' → query_sent: <code>' + escapeHtml(s.query_sent || '') + '</code>';
+      html += ' | hits: <strong>' + (s.hit_count || 0) + '</strong>';
+      if (s.error) html += ' | <span class="error">ERROR: ' + escapeHtml(s.error) + '</span>';
+      if (s.raw_first_hit_keys && s.raw_first_hit_keys.length) {
+        html += ' | hit keys: <code>' + escapeHtml(s.raw_first_hit_keys.join(', ')) + '</code>';
+      }
+      if (s.search_params) html += ' | params: <code>' + escapeHtml(JSON.stringify(s.search_params)) + '</code>';
+      if (s.top_result) html += '<br>top: <code>' + escapeHtml(JSON.stringify(s.top_result)) + '</code>';
+      html += '</div>';
+    }
+    html += '</details>';
+    return html;
+  }
+
+  function appendChatMessage(role, text, debug, resultsFromApi, apiDebug) {
     var wrap = document.createElement('div');
     wrap.className = 'chat-msg chat-msg-' + role;
     var content = '';
@@ -189,6 +220,10 @@
         content = tableHtml || (text || '').replace(/\n/g, '<br>');
       }
       if (!content) content = (text || '').replace(/\n/g, '<br>');
+      // Append inline search debug when checkbox is on
+      if (debugCheckbox && debugCheckbox.checked && apiDebug) {
+        content += renderSearchDebug(apiDebug);
+      }
     } else {
       content = (text || '').replace(/\n/g, '<br>');
     }
@@ -248,7 +283,8 @@
         debug.response = { status: res.status, body: data };
         const responseText = data.response != null ? String(data.response) : '';
         const resultsFromApi = data.results || null;
-        appendChatMessage('agent', responseText, debug, resultsFromApi);
+        const apiDebug = data.debug || null;
+        appendChatMessage('agent', responseText, debug, resultsFromApi, apiDebug);
       })
       .catch(function (e) {
         clearTimeout(timeoutId);

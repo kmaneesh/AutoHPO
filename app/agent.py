@@ -3,8 +3,11 @@ Agno HPO agent: system message, tools from hpo_tools, history. Defines POST /api
 """
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 try:
     from dotenv import load_dotenv
@@ -36,9 +39,26 @@ class HPOMatch(BaseModel):
     hpo_definition: str
 
 
+class TermDebug(BaseModel):
+    term: str
+    query_sent: str
+    hit_count: int
+    search_params: dict | None = None
+    raw_first_hit_keys: list[str] | None = None
+    top_result: dict | None = None
+    error: str | None = None
+
+
+class ChatDebug(BaseModel):
+    parsed_terms: list[str]
+    agent_raw: str
+    term_searches: list[TermDebug]
+
+
 class ChatResponse(BaseModel):
     response: str
     results: list[HPOMatch] | None = None
+    debug: ChatDebug | None = None
 
 
 HPO_SYSTEM_MESSAGE = """\
@@ -204,13 +224,23 @@ def _parse_terms(content: str) -> list[str]:
     return terms
 
 
-def _build_hpo_matches(terms: list[str]) -> list[HPOMatch]:
-    """For each term, run hybrid search (Meilisearch) and return the top-1 match as an HPOMatch."""
+def _build_hpo_matches(terms: list[str]) -> tuple[list[HPOMatch], list[TermDebug]]:
+    """For each term, run hybrid search (Meilisearch). Returns (matches, term_debug_list)."""
     matches: list[HPOMatch] = []
+    term_debugs: list[TermDebug] = []
     for term in terms:
-        results = hpo.search_hpo_results(term, limit=HPO_RESULTS_PER_TERM)
+        results, search_debug = hpo.search_hpo_results(term, limit=HPO_RESULTS_PER_TERM)
+        td = TermDebug(
+            term=term,
+            query_sent=search_debug.get("query_sent", ""),
+            hit_count=search_debug.get("hit_count", 0),
+            search_params=search_debug.get("search_params"),
+            raw_first_hit_keys=search_debug.get("raw_first_hit_keys"),
+            error=search_debug.get("error"),
+        )
         if results:
             top = results[0]
+            td.top_result = top
             matches.append(HPOMatch(
                 medical_term=term,
                 hpo_id=top.get("hpo_id", ""),
@@ -224,7 +254,9 @@ def _build_hpo_matches(terms: list[str]) -> list[HPOMatch]:
                 hpo_name="",
                 hpo_definition="",
             ))
-    return matches
+        term_debugs.append(td)
+        logger.info("Term %r → %d hits, top=%s, error=%s", term, td.hit_count, td.top_result, td.error)
+    return matches, term_debugs
 
 
 def init_app() -> None:
@@ -247,7 +279,14 @@ def api_chat(body: ChatRequest):
         content = getattr(run, "content", None) or str(run)
         response_text = content or ""
         terms = _parse_terms(response_text)
-        results = _build_hpo_matches(terms) if terms else None
-        return ChatResponse(response=response_text, results=results)
-    except Exception:
+        logger.info("Parsed %d terms from agent: %s", len(terms), terms)
+        if terms:
+            matches, term_debugs = _build_hpo_matches(terms)
+            debug = ChatDebug(parsed_terms=terms, agent_raw=response_text, term_searches=term_debugs)
+        else:
+            matches = None
+            debug = ChatDebug(parsed_terms=[], agent_raw=response_text, term_searches=[])
+        return ChatResponse(response=response_text, results=matches, debug=debug)
+    except Exception as exc:
+        logger.error("api_chat FAILED: %s", exc, exc_info=True)
         return ChatResponse(response="Agent not available. Try normal search.", results=None)
