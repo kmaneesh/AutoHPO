@@ -41,11 +41,18 @@ def download_hpo(
         return out_path
 
     print(f"Downloading {HPO_JSON_URL} -> {out_path}")
-    with httpx.stream("GET", HPO_JSON_URL, follow_redirects=True) as r:
-        r.raise_for_status()
-        with open(out_path, "wb") as f:
-            for chunk in r.iter_bytes():
-                f.write(chunk)
+    try:
+        with httpx.stream("GET", HPO_JSON_URL, follow_redirects=True, timeout=120.0) as r:
+            r.raise_for_status()
+            with open(out_path, "wb") as f:
+                for chunk in r.iter_bytes():
+                    f.write(chunk)
+    except httpx.HTTPStatusError as e:
+        raise SystemExit(f"Download failed (HTTP {e.response.status_code}): {e}") from e
+    except httpx.RequestError as e:
+        raise SystemExit(f"Download failed (network): {e}") from e
+    except OSError as e:
+        raise SystemExit(f"Failed to write {out_path}: {e}") from e
     print(f"Saved {out_path} ({out_path.stat().st_size:,} bytes)")
     return out_path
 
@@ -76,12 +83,18 @@ def main() -> None:
         help="Skip download if existing file is newer than this many hours",
     )
     args = parser.parse_args()
-    download_hpo(
-        output_dir=args.output_dir,
-        output_name=args.output_name,
-        force=args.force,
-        skip_if_newer_than_hours=args.skip_if_newer_than,
-    )
+    try:
+        download_hpo(
+            output_dir=args.output_dir,
+            output_name=args.output_name,
+            force=args.force,
+            skip_if_newer_than_hours=args.skip_if_newer_than,
+        )
+    except SystemExit:
+        raise
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
 
 
 if __name__ == "__main__":
