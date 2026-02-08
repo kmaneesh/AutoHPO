@@ -262,7 +262,7 @@ def _build_hpo_matches(terms: list[str]) -> tuple[list[HPOMatch], list[TermDebug
 
 
 def _build_table_with_hpo(terms: list[str]) -> tuple[list[dict[str, Any]], list[TermDebug]]:
-    """For each term, run hybrid search and return all results in table format."""
+    """For each term, run hybrid search and return top result in table format."""
     table: list[dict[str, Any]] = []
     term_debugs: list[TermDebug] = []
     for term in terms:
@@ -279,20 +279,24 @@ def _build_table_with_hpo(terms: list[str]) -> tuple[list[dict[str, Any]], list[
             td.top_result = results[0]
         term_debugs.append(td)
         
-        # Format all results for this term
-        hpo_results = []
-        for r in results:
-            hpo_results.append({
-                "hpo_id": r.get("hpo_id", ""),
-                "name": r.get("name", ""),
-                "definition": r.get("definition", ""),
-                "score": r.get("score", 0.0),
+        # Only use top result for this term
+        if results:
+            top = results[0]
+            table.append({
+                "term": term,
+                "hpo_id": top.get("hpo_id", ""),
+                "name": top.get("name", ""),
+                "definition": top.get("definition", ""),
+                "score": top.get("score", 0.0),
             })
-        
-        table.append({
-            "term": term,
-            "hpo_results": hpo_results
-        })
+        else:
+            table.append({
+                "term": term,
+                "hpo_id": "—",
+                "name": "—",
+                "definition": "—",
+                "score": 0.0,
+            })
         
         logger.info("Term %r → %d hits, top=%s, error=%s", term, td.hit_count, td.top_result, td.error)
     

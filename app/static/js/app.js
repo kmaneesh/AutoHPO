@@ -160,24 +160,14 @@
     for (var i = 0; i < results.length; i++) {
       var row = results[i];
       var term = row.term || '';
-      var hpoResults = row.hpo_results || [];
-      var idsHtml = '';
-      var namesHtml = '';
-      var defsHtml = '';
-      for (var j = 0; j < hpoResults.length; j++) {
-        var r = hpoResults[j];
-        var id = r.hpo_id || '—';
-        var name = r.name || '—';
-        var def = (r.definition || '').slice(0, 200);
-        if (def.length === 200) def += '…';
-        idsHtml += '<div class="hpo-result-row"><span class="hpo-id">' + escapeHtml(id) + '</span></div>';
-        namesHtml += '<div class="hpo-result-row">' + escapeHtml(name) + '</div>';
-        defsHtml += '<div class="hpo-result-row">' + escapeHtml(def || '—') + '</div>';
-      }
-      if (!idsHtml) idsHtml = '—';
-      if (!namesHtml) namesHtml = '—';
-      if (!defsHtml) defsHtml = '—';
-      html += '<tr><td class="col-term">' + escapeHtml(term) + '</td><td class="col-hpo-id">' + idsHtml + '</td><td class="col-name">' + namesHtml + '</td><td class="col-def">' + defsHtml + '</td></tr>';
+      var id = row.hpo_id || '—';
+      var name = row.name || '—';
+      var def = (row.definition || '').slice(0, 200);
+      if (def.length === 200) def += '…';
+      html += '<tr><td class="col-term">' + escapeHtml(term) + '</td>';
+      html += '<td class="col-hpo-id"><span class="hpo-id">' + escapeHtml(id) + '</span></td>';
+      html += '<td class="col-name">' + escapeHtml(name) + '</td>';
+      html += '<td class="col-def">' + escapeHtml(def || '—') + '</td></tr>';
     }
     html += '</tbody></table>';
     return html;
