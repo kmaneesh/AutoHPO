@@ -1,5 +1,5 @@
 """
-Tests for app.hpo: query helpers (stop words) and Meilisearch search.
+Tests for app.hpo: query helpers (whitespace normalization) and Meilisearch search.
 Runs against actual Meilisearch when available; acceptance criteria defined below.
 Uses Test_Cases.csv when RAG_HPO_TEST_CASES is set or file exists at default path.
 """
@@ -29,44 +29,18 @@ ACCEPTANCE_QUERIES = [
 ]
 
 
-# --- Query helpers (moved to hpo.py) ---
+# --- Query helpers (whitespace normalization only; no stop-word removal) ---
 
-def test_remove_stop_words_empty():
-    from app.hpo import remove_stop_words
-    assert remove_stop_words("") == ""
-    assert remove_stop_words("   ") == ""
-
-
-def test_remove_stop_words_basic():
-    from app.hpo import remove_stop_words
-    assert remove_stop_words("the patient has a heart defect") == "patient heart defect"
-    assert remove_stop_words("and or but in on at") == ""
-
-
-def test_remove_stop_words_preserves_hpo_id():
-    from app.hpo import remove_stop_words
-    assert remove_stop_words("HP:0001631") == "HP:0001631"
-    assert remove_stop_words("find HP_0001631 and atrial defect") == "find HP_0001631 atrial defect"
-
-
-def test_remove_stop_words_collapse_whitespace():
-    from app.hpo import remove_stop_words
-    assert remove_stop_words("  atrial   septal   defect  ") == "atrial septal defect"
-
-
-def test_remove_stop_words_custom_stop_list():
-    from app.hpo import remove_stop_words
-    assert remove_stop_words("heart defect", stop_words={"heart"}) == "defect"
-
-
-def test_prepare_search_query_returns_original_if_empty_after_stop_words():
+def test_prepare_search_query_empty():
     from app.hpo import prepare_search_query
-    assert prepare_search_query("  the and or  ") == "the and or"
+    assert prepare_search_query("") == ""
+    assert prepare_search_query("   ") == ""
 
 
-def test_prepare_search_query_normalizes():
+def test_prepare_search_query_normalizes_whitespace():
     from app.hpo import prepare_search_query
-    assert prepare_search_query("the patient with atrial septal defect") == "patient atrial septal defect"
+    assert prepare_search_query("  atrial   septal   defect  ") == "atrial septal defect"
+    assert prepare_search_query("the patient with atrial septal defect") == "the patient with atrial septal defect"
 
 
 # --- Meilisearch client ---
@@ -149,32 +123,32 @@ class TestHPOSearchReal:
         )
 
     def test_search_hpo_normalizes_query(self):
-        """Query with stop words is normalized before search (no error, same path)."""
+        """Query is whitespace-normalized before search (no error, same path)."""
         from app.hpo import search_hpo
         result = search_hpo("the patient with a heart defect", limit=3)
         data = json.loads(result)
         assert isinstance(data, list)
 
 
-def test_search_funnel_uses_hpo_normalization():
-    """search_funnel passes query to search_hpo (which normalizes internally)."""
-    from app.search import search_funnel
-    with patch("app.search.search_hpo") as mock_hpo:
-        mock_hpo.return_value = "[]"
-        search_funnel("the patient has a heart defect", limit=5)
-        call_args = mock_hpo.call_args
-        assert call_args is not None
-        # search_hpo receives raw query; it normalizes internally
-        assert "heart" in call_args.kwargs["query"] or "patient" in call_args.kwargs["query"]
+def test_search_returns_list_normalized():
+    """search with normalized query returns list of term dicts."""
+    from app.search import search, normalize_query
+    q = normalize_query("heart")
+    results = search(query=q or "heart", limit=5)
+    assert isinstance(results, list)
+    for item in results:
+        assert "hpo_id" in item and "name" in item
 
 
 @pytest.mark.skipif(
     not (ROOT / "data" / "hp.json").exists(),
     reason="data/hp.json not found (run download_hpo.py)",
 )
-def test_regex_search_hp_json_returns_list():
-    from app.search import regex_search_hp_json
-    results = regex_search_hp_json("heart", limit=3)
+def test_search_returns_list():
+    """search.search returns list of term dicts when hp.json is loaded."""
+    from app import search as search_module
+    search_module.init_app()
+    results = search_module.search("heart", limit=3)
     assert isinstance(results, list)
     for item in results:
         assert "hpo_id" in item
@@ -206,11 +180,12 @@ def test_case_queries(test_cases_csv_path: Path):
     return _load_test_case_queries(test_cases_csv_path, max_cases=5)
 
 
-def test_search_funnel_with_test_cases(test_case_queries):
-    """Run search_funnel on first 5 test case excerpts; check valid structure."""
-    from app.search import search_funnel
+def test_search_with_test_cases(test_case_queries):
+    """Run search (normalized query) on first 5 test case excerpts; check valid structure."""
+    from app.search import search, normalize_query
     for case_id, query in test_case_queries:
-        results = search_funnel(query, limit=10)
+        q = normalize_query(query)
+        results = search(query=q or query.strip(), limit=10)
         assert isinstance(results, list)
         for item in results:
             assert "hpo_id" in item

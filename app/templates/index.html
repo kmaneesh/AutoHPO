@@ -8,35 +8,48 @@
   <link rel="stylesheet" href="/static/css/tailwind.css">
 </head>
 <body>
-  <h1>AutoHPO</h1>
-  <p class="muted">HPO term search from patient history or phenotype query.</p>
+  <div class="page-wrap">
+    <div class="main-content">
+      <header class="page-header">
+        <h1>AutoHPO</h1>
+        <p class="muted">HPO term search and clinical term extraction from patient history.</p>
+      </header>
 
-  <form id="search-form" action="#" method="post">
-    <label for="query">Patient history</label>
-    <textarea id="query" name="query" rows="6" placeholder="Paste clinical note or enter phenotype query (e.g. atrial septal defect, HP:0001631)…"></textarea>
-    <button type="submit" id="search">Search</button>
+      <div class="mode-tabs" role="tablist">
+        <button type="button" role="tab" id="tab-search" aria-selected="true" aria-controls="panel-search">Search</button>
+        <button type="button" role="tab" id="tab-history" aria-selected="false" aria-controls="panel-history">Extract terms (agent)</button>
+      </div>
 
-    <label for="mode" class="mode-label">Search mode</label>
-    <select id="mode" name="mode">
-      <option value="agent">Agent (natural language, uses LLM + HPO tools)</option>
-      <option value="pure">Pure search (bypass agent, HPO index only)</option>
-    </select>
+      <!-- Search mode -->
+      <section id="panel-search" role="tabpanel" aria-labelledby="tab-search" class="panel">
+        <label for="search-query">Type to search HPO (live)</label>
+        <input type="text" id="search-query" name="query" placeholder="e.g. atrial septal defect, tachycardia…" autocomplete="off" />
+        <div id="search-result" class="search-result" aria-live="polite"></div>
+      </section>
 
-    <label class="mode-label"><input type="checkbox" id="debug" name="debug" /> Debug mode (show request &amp; response)</label>
-  </form>
+      <!-- History mode: full-height chat -->
+      <section id="panel-history" role="tabpanel" aria-labelledby="tab-history" class="panel hidden panel-chat">
+        <div class="chat-panel">
+          <div id="chat-history" class="chat-history" aria-live="polite"></div>
+          <form id="chat-form" class="chat-form">
+            <label for="chat-query">Paste clinical note or message</label>
+            <textarea id="chat-query" name="query" rows="3" placeholder="Paste clinical note…"></textarea>
+            <button type="submit" id="chat-send">Send</button>
+          </form>
+        </div>
+      </section>
+    </div>
 
-  <div id="result" aria-live="polite"></div>
-
-  <nav class="routes">
-    <strong>Routes</strong>
-    <ul>
-      <li><code>GET /</code> – This page</li>
-      <li><code>GET /health</code> – <a href="/health">Health check</a></li>
-      <li><code>GET /api/sse</code> – SSE for MCP</li>
-      <li><code>POST /api/chat</code> – Agent, fallback to search if LLM unavailable (body: <code>{"query": "..."}</code>)</li>
-      <li><code>POST /api/search</code> – Pure search (body: <code>{"query": "..."}</code>)</li>
-    </ul>
-  </nav>
+    <aside class="debug-sidebar" id="debug-sidebar">
+      <div class="debug-header">
+        <label class="debug-label"><input type="checkbox" id="debug" name="debug" /> Debug</label>
+      </div>
+      <details class="debug-details" id="debug-details">
+        <summary>Request / response</summary>
+        <div id="debug-content" class="debug-content"></div>
+      </details>
+    </aside>
+  </div>
 
   <script src="/static/js/alpine.js" defer></script>
   <script src="/static/js/app.js" defer></script>

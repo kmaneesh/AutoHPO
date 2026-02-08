@@ -14,14 +14,18 @@ services:
       timeout: 5s
       retries: 6
       start_period: 10s
+    networks:
+      - default
 
   app:
     build: .
     ports:
-      - "127.0.0.1:8000:8000"
+      - "8000:8000"
     environment:
       MEILISEARCH_URL: ${MEILISEARCH_URL:-http://meilisearch:7700}
       MEILI_MASTER_KEY: ${MEILI_MASTER_KEY:-masterKey}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - ./data:/app/data
     depends_on:
