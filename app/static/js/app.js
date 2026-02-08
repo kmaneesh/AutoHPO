@@ -136,7 +136,6 @@
     var rows = parseMarkdownTable(text);
     if (!rows || rows.length < 2) return null;
     var headers = rows[0];
-    var headerMap = { 'medical term': 0, 'hpo id': 1, 'hpo definition': 2 };
     var colTerm = 0, colHpoId = 1, colDef = 2;
     var h0 = (headers[0] || '').toLowerCase();
     if (h0.indexOf('medical') !== -1) colTerm = 0;
@@ -155,15 +154,41 @@
     return html;
   }
 
+  function renderResultsFromApi(results) {
+    if (!results || !results.length) return null;
+    var html = '<table class="extract-table"><thead><tr>';
+    html += '<th class="col-term">Medical term</th><th class="col-hpo-id">HPO ID</th><th class="col-name">HPO Name</th><th class="col-def">HPO Definition</th></tr></thead><tbody>';
+    for (var i = 0; i < results.length; i++) {
+      var r = results[i];
+      var term = r.medical_term || '';
+      var id = r.hpo_id || '—';
+      var name = r.hpo_name || '—';
+      var def = (r.hpo_definition || '').slice(0, 200);
+      if (def.length === 200) def += '…';
+      html += '<tr><td class="col-term">' + escapeHtml(term) + '</td>';
+      html += '<td class="col-hpo-id"><span class="hpo-id">' + escapeHtml(id) + '</span></td>';
+      html += '<td class="col-name">' + escapeHtml(name) + '</td>';
+      html += '<td class="col-def">' + escapeHtml(def || '—') + '</td></tr>';
+    }
+    html += '</tbody></table>';
+    return html;
+  }
+
   var chatRequestInFlight = false;
 
-  function appendChatMessage(role, text, debug) {
+  function appendChatMessage(role, text, debug, resultsFromApi) {
     var wrap = document.createElement('div');
     wrap.className = 'chat-msg chat-msg-' + role;
     var content = '';
-    if (role === 'agent' && text) {
-      var tableHtml = renderAgentResponseAsTable(text);
-      content = tableHtml || (text || '').replace(/\n/g, '<br>');
+    if (role === 'agent') {
+      if (resultsFromApi && resultsFromApi.length) {
+        content = renderResultsFromApi(resultsFromApi);
+      }
+      if (!content && text) {
+        var tableHtml = renderAgentResponseAsTable(text);
+        content = tableHtml || (text || '').replace(/\n/g, '<br>');
+      }
+      if (!content) content = (text || '').replace(/\n/g, '<br>');
     } else {
       content = (text || '').replace(/\n/g, '<br>');
     }
@@ -222,7 +247,8 @@
         const data = _.data;
         debug.response = { status: res.status, body: data };
         const responseText = data.response != null ? String(data.response) : '';
-        appendChatMessage('agent', responseText, debug);
+        const resultsFromApi = data.results || null;
+        appendChatMessage('agent', responseText, debug, resultsFromApi);
       })
       .catch(function (e) {
         clearTimeout(timeoutId);

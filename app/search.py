@@ -1,6 +1,6 @@
 """
-Search funnel and POST /api/search endpoint.
-Funnel: Meilisearch (hpo) then regex on data/hp.json.
+Pure regex search over in-memory HPO data (loaded once at startup).
+POST /api/search: keyword/typeahead style. No Meilisearch at runtime.
 """
 from __future__ import annotations
 
@@ -11,28 +11,21 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from app.hpo import prepare_search_query, search_hpo
-
 router = APIRouter()
 
 
-class SearchRequest(BaseModel):
-    query: str
+_ROOT = Path(__file__).resolve().parent.parent
+_HP_JSON_PATH = _ROOT / "data" / "hp.json"
+
+# Loaded once at startup
+_terms: list[dict] = []
 
 
-@router.post("/api/search")
-def api_search(body: SearchRequest):
-    """Pure HPO search: Meilisearch then regex on hp.json. Returns query_sent (after normalization) and results."""
-    try:
-        query_sent = prepare_search_query(body.query)
-        results = search_funnel(query=body.query, limit=15)
-        return {"query_sent": query_sent, "results": results}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-# Project root and data path (hp.json)
-_PROJECT_ROOT = Path(__file__).resolve().parent.parent
-_HP_JSON_PATH = _PROJECT_ROOT / "data" / "hp.json"
+def _normalize_query(query: str) -> str:
+    """Normalize query for search: empty if blank, else single-space-joined words."""
+    if not (query or "").strip():
+        return ""
+    return " ".join(query.strip().split())
 
 
 def _curie_from_id(node_id: str) -> str:
@@ -76,41 +69,82 @@ def _parse_obographs(path: Path) -> list[dict]:
     return out
 
 
-def regex_search_hp_json(query: str, limit: int = 10) -> list[dict]:
-    """
-    Fallback: search data/hp.json with a simple regex/substring match on
-    hpo_id, name, definition, synonyms_str. Returns same shape as Meilisearch.
-    """
+def init_app() -> None:
+    """Load data/hp.json once at startup. Idempotent."""
+    global _terms
+    if _terms:
+        return
     if not _HP_JSON_PATH.exists():
+        return
+    _terms[:] = _parse_obographs(_HP_JSON_PATH)
+
+
+def get_terms() -> list[dict]:
+    """Return the in-memory HPO terms (empty if not loaded)."""
+    return _terms
+
+
+def search(query: str, limit: int = 15) -> list[dict]:
+    """
+    Regex search over in-memory terms (hpo_id, name, definition, synonyms_str).
+    Returns list of dicts with hpo_id, name, definition, synonyms_str.
+    Empty query returns first `limit` terms (for typeahead/select2).
+    """
+    init_app()
+    if not _terms:
         return []
-    terms = _parse_obographs(_HP_JSON_PATH)
-    q = (query or "").strip().lower()
+    q = (query or "").strip()
     if not q:
-        return terms[:limit]
+        return _terms[:limit]
     pattern = re.compile(re.escape(q), re.IGNORECASE)
     matched = []
-    for t in terms:
+    for t in _terms:
         if (
             pattern.search(t.get("hpo_id") or "")
             or pattern.search(t.get("name") or "")
             or pattern.search(t.get("definition") or "")
             or pattern.search(t.get("synonyms_str") or "")
         ):
-            matched.append(t)
+            matched.append({
+                "hpo_id": t.get("hpo_id"),
+                "name": t.get("name"),
+                "definition": (t.get("definition") or "")[:500],
+                "synonyms_str": t.get("synonyms_str") or "",
+            })
             if len(matched) >= limit:
                 break
     return matched
 
 
-def search_funnel(query: str, limit: int = 15) -> list[dict]:
-    """
-    Funnel: (1) Meilisearch via hpo.search_hpo (normalizes query internally); (2) on failure, regex on data/hp.json.
-    Returns list of dicts with hpo_id, name, definition, synonyms_str.
-    """
+def get_term_by_id(term_id: str) -> dict | None:
+    """Return a single term by HPO ID (e.g. HP:0001631 or HP_0001631)."""
+    init_app()
+    if not _terms:
+        return None
+    q = term_id.strip().replace("_", ":", 1) if "_" in term_id else term_id.strip()
+    for t in _terms:
+        if (t.get("hpo_id") or "").upper() == q.upper():
+            return {
+                "hpo_id": t.get("hpo_id"),
+                "name": t.get("name"),
+                "definition": (t.get("definition") or "")[:500],
+                "synonyms_str": t.get("synonyms_str") or "",
+            }
+    return None
+
+
+# --- API ---
+
+class SearchRequest(BaseModel):
+    query: str
+
+
+@router.post("/api/search")
+def api_search(body: SearchRequest):
+    """Pure HPO search: regex over in-memory hp.json. Returns query_sent (normalized) and results."""
     try:
-        raw = search_hpo(query=query, limit=limit)
-        return json.loads(raw)
-    except Exception:
-        pass
-    q = prepare_search_query(query)
-    return regex_search_hp_json(query=q, limit=limit)
+        query_sent = _normalize_query(body.query)
+        results = search(query=query_sent or body.query.strip(), limit=15)
+        return {"query_sent": query_sent, "results": results}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))

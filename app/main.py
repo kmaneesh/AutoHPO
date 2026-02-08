@@ -6,7 +6,7 @@ Routes:
   GET  /health      – Health check (web)
   GET  /static/*    – Static assets
   GET  /api/sse     – SSE for MCP (mcp_server)
-  POST /api/chat     – Agent (agent), fallback to search if LLM unavailable
+  POST /api/chat     – Agent (extract terms from history)
   POST /api/search   – Pure HPO search (search)
 """
 from contextlib import asynccontextmanager
@@ -15,15 +15,15 @@ from pathlib import Path
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
-from app import agent, mcp_server, search, web
-from app import hpo
+from app import agent, hpo, mcp_server, search, web
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Initialise Meilisearch client, embedder, and agent once at startup."""
-    hpo.init_app()
-    agent.init_app()
+    """Initialise once at startup: HPO loader (search), Meilisearch client (hpo), agent singleton. All inits are idempotent."""
+    search.init_app()   # Load data/hp.json once for in-memory regex search
+    hpo.init_app()     # Meilisearch client + embedding model once
+    agent.init_app()   # Agent singleton (history, tools) once
     yield
     # Shutdown: nothing to close (no explicit cleanup required)
 

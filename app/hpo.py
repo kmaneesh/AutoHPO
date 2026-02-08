@@ -1,15 +1,14 @@
 """
-Pure Meilisearch HPO search and query normalization (stop words). Single place for all queries.
+Pure Meilisearch HPO search and query normalization. Single place for all queries.
 Used by the agent tool and by the search funnel (second layer).
 Supports vector (semantic) search when embeddings are available (same model as load_hpo).
+No stop-word removal: medical/clinical phrasing is preserved for semantic meaning.
 """
 from __future__ import annotations
 
 import json
 import os
-import re
 from pathlib import Path
-from typing import Collection
 
 try:
     from dotenv import load_dotenv
@@ -65,51 +64,15 @@ def _embed_query(text: str) -> list[float] | None:
     vec = model.encode(text.strip(), convert_to_numpy=True)
     return vec.tolist()
 
-# Default English stop words for clinical/phenotype queries (App-level, Option A).
-# Extend via env or config if needed (e.g. HPO_STOP_WORDS="word1,word2").
-DEFAULT_STOP_WORDS: frozenset[str] = frozenset({
-    "a", "an", "the", "and", "or", "but", "in", "on", "at", "to", "for", "of", "with",
-    "by", "from", "as", "is", "are", "was", "were", "been", "be", "have", "has", "had",
-    "do", "does", "did", "will", "would", "could", "should", "may", "might", "must",
-    "can", "this", "that", "these", "those", "it", "its", "they", "them", "their",
-    "he", "she", "his", "her", "we", "our", "you", "your", "i", "my", "me",
-    "not", "no", "so", "if", "then", "than", "when", "which", "who", "what", "where",
-    "into", "through", "during", "before", "after", "above", "below", "between",
-})
-
-
-def remove_stop_words(
-    query: str,
-    stop_words: Collection[str] | None = None,
-    min_word_len: int = 1,
-) -> str:
+def prepare_search_query(query: str) -> str:
     """
-    Remove stop words from the query and collapse whitespace.
-    Keeps HPO IDs (e.g. HP:0001631) and clinical terms intact.
+    Prepare a query for HPO search: normalize whitespace only.
+    No stop-word removal so medical/clinical semantic meaning is preserved.
+    Single entry point; used inside search_hpo so all callers get the same behaviour.
     """
     if not (query or "").strip():
         return ""
-    stop = stop_words if stop_words is not None else DEFAULT_STOP_WORDS
-    tokens = re.findall(r"[^\s]+", query.strip())
-    kept = []
-    for t in tokens:
-        if re.match(r"^HP[_:]\d+", t, re.IGNORECASE):
-            kept.append(t)
-            continue
-        lower = t.lower()
-        word = re.sub(r"^[\W_]+|[\W_]+$", "", lower)
-        if len(word) >= min_word_len and word not in stop:
-            kept.append(t)
-    return " ".join(kept).strip()
-
-
-def prepare_search_query(query: str) -> str:
-    """
-    Prepare a query for HPO search: remove stop words and normalize space.
-    Single entry point; used inside search_hpo so all callers get the same filter.
-    """
-    normalized = remove_stop_words(query)
-    return normalized if normalized else query.strip()
+    return " ".join(query.strip().split())
 
 
 def get_client():
@@ -125,7 +88,7 @@ def get_client():
 def search_hpo(query: str, limit: int = 10) -> str:
     """
     Search the Human Phenotype Ontology (HPO) index via Meilisearch.
-    Query is normalized (stop words removed) before search.
+    Query is normalized (whitespace only) before search; no stop-word removal.
     When embeddings are available, uses hybrid search (full-text + vector).
     No agent, no fallbacks.
 
@@ -137,7 +100,6 @@ def search_hpo(query: str, limit: int = 10) -> str:
         JSON string of list of dicts with hpo_id, name, definition, synonyms_str.
     """
     q = prepare_search_query(query)
-    # Use original query if empty after stop-word removal (e.g. "the and or")
     search_q = q if q else query.strip()
     client = get_client()
     index = client.index(HPO_INDEX_UID)
@@ -160,3 +122,60 @@ def search_hpo(query: str, limit: int = 10) -> str:
         for h in hits
     ]
     return json.dumps(out, indent=2)
+
+
+def search_hpo_results(query: str, limit: int = 5) -> list[dict]:
+    """
+    Hybrid search (full-text + vector) over HPO index; returns list of dicts.
+    Used for mapping extracted terms to HPO (e.g. 5 results per term).
+    Returns up to `limit` items with hpo_id, name, definition, synonyms_str.
+    """
+    q = prepare_search_query(query)
+    search_q = q if q else query.strip()
+    if not search_q:
+        return []
+    try:
+        client = get_client()
+        index = client.index(HPO_INDEX_UID)
+        search_params: dict = {"limit": limit}
+        query_vector = _embed_query(search_q)
+        if query_vector is not None:
+            search_params["vector"] = query_vector
+            search_params["hybrid"] = {"embedder": HPO_EMBEDDER_NAME}
+        response = index.search(search_q, search_params)
+        hits = response.get("hits") or []
+        return [
+            {
+                "hpo_id": h.get("hpo_id"),
+                "name": h.get("name"),
+                "definition": (h.get("definition") or "")[:500],
+                "synonyms_str": h.get("synonyms_str") or "",
+            }
+            for h in hits
+        ]
+    except Exception:
+        return []
+
+
+def get_term_by_id(term_id: str) -> dict | None:
+    """
+    Fetch a single HPO term by ID (e.g. HP:0001631 or HP_0001631).
+    Returns dict with hpo_id, name, definition, synonyms_str or None if not found.
+    """
+    if not (term_id or "").strip():
+        return None
+    q = term_id.strip().replace("_", ":", 1) if "_" in term_id else term_id.strip()
+    try:
+        client = get_client()
+        index = client.index(HPO_INDEX_UID)
+        doc = index.get_document(q)
+        if not doc:
+            return None
+        return {
+            "hpo_id": doc.get("hpo_id"),
+            "name": doc.get("name"),
+            "definition": (doc.get("definition") or "")[:500],
+            "synonyms_str": doc.get("synonyms_str") or "",
+        }
+    except Exception:
+        return None

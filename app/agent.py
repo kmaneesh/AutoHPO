@@ -1,13 +1,10 @@
 """
-Full-fledged Agno HPO agent: system message, HPOTools, history. One job: run the agent.
-Defines POST /api/chat. Agent is initialised once (singleton).
+Agno HPO agent: system message, tools from hpo_tools, history. Defines POST /api/chat.
 """
 from __future__ import annotations
 
-import json
 import os
 from pathlib import Path
-from typing import Any, List
 
 try:
     from dotenv import load_dotenv
@@ -15,91 +12,112 @@ try:
 except ImportError:
     pass
 
-from fastapi import APIRouter, HTTPException
+import re
+
+from fastapi import APIRouter
 from pydantic import BaseModel
 
-from app.hpo import search_hpo
+from app import hpo
+from app.hpo_tools import HPOTools
 
-# Lazy singleton; initialised once on first get_agent() call
 _agent = None
+
+HPO_RESULTS_PER_TERM = 5
 
 
 class ChatRequest(BaseModel):
     query: str
 
 
+class HPOMatch(BaseModel):
+    medical_term: str
+    hpo_id: str
+    hpo_name: str
+    hpo_definition: str
+
+
 class ChatResponse(BaseModel):
     response: str
+    results: list[HPOMatch] | None = None
 
 
-def _format_search_results_as_response(results: list) -> str:
-    """Format search funnel results as plain text for ChatResponse."""
-    if not results:
-        return "No HPO terms found."
-    lines = ["**Search results (HPO):**", ""]
-    for t in results:
-        lines.append(f"- **{t.get('hpo_id', '')}** {t.get('name', '')}")
-        if t.get("definition"):
-            lines.append(f"  {str(t['definition'])[:200]}…")
-        lines.append("")
-    return "\n".join(lines).strip()
+HPO_SYSTEM_MESSAGE = """\
+You are a Clinical Informatics Specialist extracting phenotypic findings from medical narratives for HPO term search.
+
+## Task
+Extract atomic clinical findings from the narrative. Output clean medical terms only—no HPO mapping yet.
+
+## Rules
+
+### 1. Atomic extraction
+- One concept per term
+- Split compound phrases: "Hypertension and syncope" → "Hypertension", "Syncope"
+- Example: "Macrocephaly with developmental delay" → "Macrocephaly", "Developmental delay"
+
+### 2. Deduplication
+- Merge repeated concepts with different wording
+- "Prominent bronchovascular markings bilaterally" + "Increased bronchovascular markings right parahilar" → "Prominent bronchovascular markings"
+- List each unique finding once
+
+### 3. Handle negation (CRITICAL)
+- **Exclude** negated findings completely
+- Negation markers: no, denies, absent, negative for, without, never, ruled out, no history of
+- "No seizures" → omit "Seizures"
+- "Denies chest pain" → omit "Chest pain"
+
+### 4. Normalize terms
+- Use standard medical terminology when clear
+- Colloquial → Medical: "racing heart" → "Tachycardia"
+- You may suggest synonyms separately if helpful for search
+- Preserve clinically significant qualifiers: "Severe intellectual disability" not just "Intellectual disability"
+
+### 5. Output format
+- **Bare terms only**—no parentheses, brackets, or measurements
+- Not: "Hepatomegaly (liver 9 cm)" → Just: "Hepatomegaly"
+- Not: "Tachycardia (racing heart)" → Just: "Tachycardia"
+- Optionally list synonyms as separate entries if they aid search
+
+### 6. Exclude
+- Social history, demographics, medications (unless describing a finding)
+- **Family history**: ignore "mother had", "family history of", etc.
+- Extract only the patient's own findings
+
+### 7. Uncertainty
+- Include suspected/possible findings
+- Note uncertainty briefly if needed: "Suspected seizure activity"
+
+## Output
+Return ONLY a numbered list of clinical terms, one per line. No headers, no extra text, no markdown tables.
+Example format:
+1. Macrocephaly
+2. Developmental delay
+3. Tachycardia
+
+"""
 
 
-# --- Agno agent (import here to avoid circular deps; build after router)
 def _build_agent():
     from agno.agent import Agent
     from agno.models.openai import OpenAIChat
-    from agno.tools import Toolkit
-
-    class HPOTools(Toolkit):
-        def __init__(self, **kwargs: Any):
-            tools: List[Any] = [self.search_hpo, self.get_hpo_term]
-            super().__init__(name="hpo_tools", tools=tools, **kwargs)
-
-        def search_hpo(self, query: str, limit: int = 10) -> str:
-            try:
-                return search_hpo(query=query, limit=limit)
-            except Exception as e:
-                return f"Error searching HPO for '{query}': {e}"
-
-        def get_hpo_term(self, term_id: str) -> str:
-            try:
-                q = term_id.strip().replace("_", ":", 1) if "_" in term_id else term_id.strip()
-                raw = search_hpo(query=q, limit=1)
-                results = json.loads(raw)
-                if results:
-                    return json.dumps(results[0], indent=2)
-                return f"No HPO term found for ID: {term_id}"
-            except Exception as e:
-                return f"Error fetching HPO term '{term_id}': {e}"
-
-    HPO_SYSTEM_MESSAGE = """\
-You are an HPO (Human Phenotype Ontology) assistant that helps users find phenotype terms from natural language descriptions of clinical features, symptoms, or conditions.
-
-## Your responsibilities
-
-1. **Answer phenotype queries** – Use the search tool for any question about phenotypes, HPO terms, clinical findings, or symptom mapping.
-2. **Cite HPO IDs** – When presenting results, show HPO ID, name, and a short definition or synonym when helpful.
-3. **Acknowledge uncertainty** – If no results are found, say so and suggest rephrasing the query.
-4. **No fabrication** – Do not answer from memory; always use the search tool for HPO lookups.
-
-## Guidelines
-
-- For descriptions like "heart defect", "delayed development", or an HPO ID (e.g. HP:0001631), call the search tool with an appropriate query.
-- Summarize matching terms clearly. If the user asks for a single term, highlight the best match.
-- If the query is ambiguous, you may run the tool with a broad query and then narrow down, or ask the user to clarify.
-- Use clear, professional language. You may use markdown for lists and structure.
-"""
+    from agno.db.sqlite import SqliteDb
 
     model = OpenAIChat(
-        base_url=os.environ.get("OPENAI_BASE_URL", "http://100.72.226.65:1234/v1"),
+        base_url=os.environ.get("OPENAI_BASE_URL", "http://100.74.210.70:1234/v1"),
         id=os.environ.get("OPENAI_MODEL_ID", "qwen2.5-7b-instruct-1m"),
         api_key=os.environ.get("OPENAI_API_KEY", "NA"),
     )
+    # Persistent DB for chat history (add_history_to_context); path under project data/
+    _root = Path(__file__).resolve().parent.parent
+    _db_file = os.environ.get("AGENT_DB_FILE") or "data/agent.db"
+    _db_path = _root / _db_file if not Path(_db_file).is_absolute() else Path(_db_file)
+    _db_path.parent.mkdir(parents=True, exist_ok=True)
+    db = SqliteDb(db_file=str(_db_path))
+
     return Agent(
         name="HPO Agent",
         model=model,
         tools=[HPOTools()],
+        db=db,
         system_message=HPO_SYSTEM_MESSAGE,
         add_datetime_to_context=True,
         add_history_to_context=True,
@@ -118,6 +136,97 @@ def get_agent():
     return _agent
 
 
+def _strip_brackets(s: str) -> str:
+    """Remove everything in parentheses () or brackets [] and trim."""
+    s = (s or "").strip()
+    s = re.sub(r"\([^)]*\)", "", s)
+    s = re.sub(r"\[[^\]]*\]", "", s)
+    return s.strip()
+
+
+def _parse_terms(content: str) -> list[str]:
+    """
+    Extract medical terms from the agent's response.
+    Handles numbered lists ("1. Term"), bullet lists ("- Term", "* Term"),
+    bare lines, and markdown tables (first column).
+    """
+    terms: list[str] = []
+    seen: set[str] = set()
+    for line in (content or "").strip().splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        # Markdown table row
+        if "|" in line:
+            cells = [c.strip() for c in line.split("|")]
+            if cells and cells[0] == "" and len(cells) > 1:
+                cells = cells[1:]
+            if cells and cells[-1] == "" and len(cells) > 1:
+                cells = cells[:-1]
+            if len(cells) < 1:
+                continue
+            candidate = _strip_brackets(cells[0])
+            # Skip separator rows (---) and header-like rows
+            if not candidate or re.match(r"^[-:]+$", candidate) or candidate.lower().startswith("medical"):
+                continue
+            key = candidate.lower()
+            if key not in seen:
+                seen.add(key)
+                terms.append(candidate)
+            continue
+        # Numbered list: "1. Term" / "1) Term"
+        m = re.match(r"^\d+[\.\)]\s+(.+)$", line)
+        if m:
+            candidate = _strip_brackets(m.group(1))
+            if candidate:
+                key = candidate.lower()
+                if key not in seen:
+                    seen.add(key)
+                    terms.append(candidate)
+            continue
+        # Bullet list: "- Term" / "* Term"
+        m = re.match(r"^[-*]\s+(.+)$", line)
+        if m:
+            candidate = _strip_brackets(m.group(1))
+            if candidate:
+                key = candidate.lower()
+                if key not in seen:
+                    seen.add(key)
+                    terms.append(candidate)
+            continue
+        # Bare line (skip obvious non-term lines)
+        candidate = _strip_brackets(line)
+        if candidate and not re.match(r"^(#|here|the |i |note)", candidate, re.IGNORECASE):
+            key = candidate.lower()
+            if key not in seen:
+                seen.add(key)
+                terms.append(candidate)
+    return terms
+
+
+def _build_hpo_matches(terms: list[str]) -> list[HPOMatch]:
+    """For each term, run hybrid search (Meilisearch) and return the top-1 match as an HPOMatch."""
+    matches: list[HPOMatch] = []
+    for term in terms:
+        results = hpo.search_hpo_results(term, limit=HPO_RESULTS_PER_TERM)
+        if results:
+            top = results[0]
+            matches.append(HPOMatch(
+                medical_term=term,
+                hpo_id=top.get("hpo_id", ""),
+                hpo_name=top.get("name", ""),
+                hpo_definition=top.get("definition", ""),
+            ))
+        else:
+            matches.append(HPOMatch(
+                medical_term=term,
+                hpo_id="",
+                hpo_name="",
+                hpo_definition="",
+            ))
+    return matches
+
+
 def init_app() -> None:
     """
     Initialise the agent singleton at app startup.
@@ -131,17 +240,14 @@ router = APIRouter()
 
 @router.post("/api/chat", response_model=ChatResponse)
 def api_chat(body: ChatRequest):
-    """Run the HPO agent; if LLM is unavailable, fall back to pure search."""
+    """Run the HPO agent; parse extracted terms, run hybrid search per term (top-1), return response + flat results."""
     try:
         agent = get_agent()
         run = agent.run(body.query)
         content = getattr(run, "content", None) or str(run)
-        return ChatResponse(response=content or "")
+        response_text = content or ""
+        terms = _parse_terms(response_text)
+        results = _build_hpo_matches(terms) if terms else None
+        return ChatResponse(response=response_text, results=results)
     except Exception:
-        try:
-            from app.search import search_funnel
-            results = search_funnel(query=body.query, limit=15)
-            text = _format_search_results_as_response(results)
-            return ChatResponse(response=f"*Agent unavailable. Using search:*\n\n{text}")
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=str(e))
+        return ChatResponse(response="Agent not available. Try normal search.", results=None)

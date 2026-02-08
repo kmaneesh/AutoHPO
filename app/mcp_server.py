@@ -40,9 +40,10 @@ async def api_sse():
 
 
 def _search_hpo_impl(query: str, limit: int = 10) -> str:
-    """Call the search funnel (Meilisearch then regex on hp.json)."""
-    from app.search import search_funnel
-    results = search_funnel(query=query, limit=limit)
+    """Call search (regex over in-memory HPO data) with normalized query."""
+    from app.search import search, normalize_query
+    q = normalize_query(query)
+    results = search(query=q or query.strip(), limit=limit)
     return json.dumps(results, indent=2)
 
 
