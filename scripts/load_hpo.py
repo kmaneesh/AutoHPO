@@ -40,6 +40,10 @@ HPO_INDEX_UID = "hpo"
 # Primary key must be alphanumeric, hyphen, underscore only (no colon). Use id for Meilisearch; hpo_id for display.
 MEILISEARCH_PRIMARY_KEY = "id"
 SEARCHABLE_ATTRIBUTES = ["hpo_id", "name", "definition", "synonyms_str"]
+# Embedder name must match index settings and app/hpo.py HPO_EMBEDDER_NAME when using hybrid search.
+# With source: userProvided, every document must have _vectors[embedder_name] = array or null (opt-out with null).
+DEFAULT_EMBEDDER_NAME = "all-MiniLM-L6-v2"
+DEFAULT_EMBEDDING_DIMENSIONS = 384
 
 
 def _curie_to_safe_id(curie: str) -> str:
@@ -126,6 +130,119 @@ def _replace_index() -> bool:
     return v in ("1", "true", "yes")
 
 
+def _embedder_name() -> str:
+    """Embedder name in Meilisearch index (must match settings). Used in _vectors.<name>."""
+    return os.environ.get("HPO_EMBEDDER_NAME", os.environ.get("EMBEDDER_NAME", DEFAULT_EMBEDDER_NAME)).strip() or DEFAULT_EMBEDDER_NAME
+
+
+def _embedding_dimensions() -> int:
+    return int(os.environ.get("HPO_EMBEDDING_DIMENSIONS", os.environ.get("EMBEDDING_DIMENSIONS", str(DEFAULT_EMBEDDING_DIMENSIONS))))
+
+
+def create_index(
+    client: "MeilisearchClient",
+    index_uid: str = HPO_INDEX_UID,
+    primary_key: str = MEILISEARCH_PRIMARY_KEY,
+    embedder_name: str | None = None,
+    dimensions: int | None = None,
+    replace: bool = False,
+):
+    """
+    Create or recreate the HPO index with primary key and optional userProvided embedder.
+    When embedder_name/dimensions are set, configures embedders.<name>: { source: "userProvided", dimensions }.
+    With userProvided, every document must provide _vectors.<embedder_name> (array or null).
+    Returns the index instance. Handles existing index and embedder config errors.
+    """
+    if replace:
+        try:
+            idx = client.get_index(index_uid)
+            print(f"Deleting existing index '{index_uid}' ...")
+            task_info = idx.delete()
+            idx.wait_for_task(task_info.task_uid, timeout_in_ms=15_000)
+            print(f"✓ Index '{index_uid}' deleted.")
+        except Exception as e:
+            print(f"Note: could not delete index (may not exist): {e}", file=sys.stderr)
+    
+    try:
+        idx = client.get_index(index_uid)
+        idx.fetch_info()
+        current_pk = getattr(idx, "primary_key", None)
+        if current_pk != primary_key:
+            print(f"Recreating index {index_uid} with primary key '{primary_key}' (was '{current_pk}') ...")
+            task_info = idx.delete()
+            idx.wait_for_task(task_info.task_uid, timeout_in_ms=10_000)
+            client.create_index(index_uid, {"primaryKey": primary_key})
+            idx = client.index(index_uid)
+            print(f"✓ Index '{index_uid}' created with primary key '{primary_key}'.")
+        else:
+            print(f"Index '{index_uid}' already exists (primary key: {primary_key}).")
+    except Exception:
+        print(f"Creating new index '{index_uid}' with primary key '{primary_key}' ...")
+        client.create_index(index_uid, {"primaryKey": primary_key})
+        idx = client.index(index_uid)
+        print(f"✓ Index '{index_uid}' created.")
+
+    print(f"Updating searchable attributes: {SEARCHABLE_ATTRIBUTES}")
+    idx.update_searchable_attributes(SEARCHABLE_ATTRIBUTES)
+
+    name = embedder_name or _embedder_name()
+    dims = dimensions if dimensions is not None else _embedding_dimensions()
+    print(f"Configuring embedder '{name}' (userProvided, dimensions={dims}) ...")
+    try:
+        task_info = idx.update_embedders({
+            name: {"source": "userProvided", "dimensions": dims},
+        })
+        if getattr(task_info, "task_uid", None):
+            idx.wait_for_task(task_info.task_uid, timeout_in_ms=15_000)
+        print(f"✓ Embedder '{name}' configured.")
+    except Exception as e:
+        print(f"Note: embedder settings (index may already have embedder '{name}'): {e}", file=sys.stderr)
+    return idx
+
+
+def _compute_embeddings(terms: list[dict], model_id: str, force_download: bool = False) -> tuple[bool, list[dict]]:
+    """
+    Compute embeddings for all terms. Returns (success, terms_with_embeddings).
+    If force_download, uses temp cache. Adds '_embedding' key to each term dict.
+    """
+    try:
+        from sentence_transformers import SentenceTransformer
+    except ImportError:
+        print("sentence-transformers not installed; skipping embeddings.", file=sys.stderr)
+        return False, terms
+
+    print(f"Loading embedding model ({model_id}) ...")
+    try:
+        if force_download:
+            import tempfile
+            print("Force re-downloading model (clean cache for this run).")
+            print("Tip: delete ~/.cache/torch/sentence_transformers to refresh default cache for future runs.")
+            tmp_cache = tempfile.mkdtemp(prefix="autohpo_embed_")
+            model = SentenceTransformer(model_id, cache_folder=tmp_cache)
+        else:
+            model = SentenceTransformer(model_id)
+    except Exception as e:
+        print(f"Failed to load model {model_id}: {e}", file=sys.stderr)
+        print("Falling back to keyword-only search. Set ENABLE_EMBEDDING=false to skip embedding.", file=sys.stderr)
+        return False, terms
+
+    texts = [
+        f"{t['name']}. {t['definition']}. {t['synonyms_str']}".strip() or t["hpo_id"]
+        for t in terms
+    ]
+    print(f"Computing embeddings for {len(texts)} terms ...")
+    try:
+        embeddings = model.encode(texts, show_progress_bar=True)
+        for t, vec in zip(terms, embeddings, strict=True):
+            t["_embedding"] = vec.tolist()
+        print(f"✓ Generated {len(embeddings)} embeddings.")
+        return True, terms
+    except Exception as e:
+        print(f"Embedding failed: {e}", file=sys.stderr)
+        print("Indexing without embeddings (keyword-only).", file=sys.stderr)
+        return False, terms
+
+
 def load_hpo(
     json_path: Path,
     meilisearch_url: str,
@@ -151,93 +268,35 @@ def load_hpo(
     print(f"Parsing {json_path} ...")
     terms = parse_obographs(json_path)
     print(f"Parsed {len(terms)} terms.")
-    print("Search mode: keyword + embedding." if use_embedding else "Search mode: keyword-only (ENABLE_EMBEDDING=false or --no-embed).")
 
     if use_embedding:
-        try:
-            from sentence_transformers import SentenceTransformer
-        except ImportError:
-            print("sentence-transformers not installed; skipping embeddings.", file=sys.stderr)
-            use_embedding = False
-        else:
-            print(f"Loading embedding model ({model_id}) ...")
-            if force_download:
-                # Re-download into a separate cache to avoid UNEXPECTED position_ids / bad cache
-                import tempfile
-                print("Force re-downloading model (clean cache for this run). Tip: delete ~/.cache/torch/sentence_transformers to refresh default cache for future runs.")
-                with tempfile.TemporaryDirectory(prefix="autohpo_embed_") as tmp_cache:
-                    try:
-                        model = SentenceTransformer(model_id, cache_folder=tmp_cache)
-                    except Exception as e:
-                        print(f"Failed to load model {model_id}: {e}", file=sys.stderr)
-                        use_embedding = False
-                    else:
-                        texts = [
-                            f"{t['name']}. {t['definition']}. {t['synonyms_str']}".strip() or t["hpo_id"]
-                            for t in terms
-                        ]
-                        print("Computing embeddings ...")
-                        try:
-                            embeddings = model.encode(texts, show_progress_bar=True)
-                            for t, vec in zip(terms, embeddings, strict=True):
-                                t["_embedding"] = vec.tolist()
-                        except Exception as e:
-                            print(f"Embedding failed: {e}", file=sys.stderr)
-                            print("Indexing without embeddings (keyword-only).", file=sys.stderr)
-                            use_embedding = False
-            else:
-                try:
-                    model = SentenceTransformer(model_id)
-                except Exception as e:
-                    print(f"Failed to load model {model_id}: {e}", file=sys.stderr)
-                    print("Falling back to keyword-only search. Set ENABLE_EMBEDDING=false to skip embedding.", file=sys.stderr)
-                    use_embedding = False
-                else:
-                    texts = [
-                        f"{t['name']}. {t['definition']}. {t['synonyms_str']}".strip() or t["hpo_id"]
-                        for t in terms
-                    ]
-                    print("Computing embeddings ...")
-                    try:
-                        embeddings = model.encode(texts, show_progress_bar=True)
-                        for t, vec in zip(terms, embeddings, strict=True):
-                            t["_embedding"] = vec.tolist()
-                    except Exception as e:
-                        print(f"Embedding failed: {e}", file=sys.stderr)
-                        print("Indexing without embeddings (keyword-only).", file=sys.stderr)
-                        use_embedding = False
+        use_embedding, terms = _compute_embeddings(terms, model_id, force_download)
+    
+    if use_embedding:
+        print("Search mode: keyword + embedding (hybrid).")
+    else:
+        print("Search mode: keyword-only (ENABLE_EMBEDDING=false or --no-embed or embedding failed).")
 
     try:
         client = MeilisearchClient(meilisearch_url, api_key=api_key or None)
     except Exception as e:
         print(f"Meilisearch client error: {e}", file=sys.stderr)
         sys.exit(1)
-    # Option: delete existing index and load fresh (no stale data, no duplicates from previous runs)
-    if do_replace_index:
-        try:
-            idx = client.get_index(index_uid)
-            print(f"Deleting existing index '{index_uid}' (--replace-index) ...")
-            task_info = idx.delete()
-            idx.wait_for_task(task_info.task_uid, timeout_in_ms=15_000)
-        except Exception:
-            pass  # index may not exist
-    try:
-        idx = client.get_index(index_uid)
-        idx.fetch_info()
-        if getattr(idx, "primary_key", None) != MEILISEARCH_PRIMARY_KEY:
-            # Old index had primaryKey hpo_id (invalid due to colon); recreate with id
-            print(f"Recreating index {index_uid} with primary key '{MEILISEARCH_PRIMARY_KEY}' (was '{getattr(idx, 'primary_key', None)}') ...")
-            task_info = idx.delete()
-            idx.wait_for_task(task_info.task_uid, timeout_in_ms=10_000)
-            client.create_index(index_uid, {"primaryKey": MEILISEARCH_PRIMARY_KEY})
-            idx = client.index(index_uid)
-    except Exception:
-        client.create_index(index_uid, {"primaryKey": MEILISEARCH_PRIMARY_KEY})
-        idx = client.index(index_uid)
-    idx.update_searchable_attributes(SEARCHABLE_ATTRIBUTES)
 
-    # Build documents; deduplicate by id so one document per primary key (last wins)
+    embedder_name = _embedder_name()
+    idx = create_index(
+        client,
+        index_uid=index_uid,
+        primary_key=MEILISEARCH_PRIMARY_KEY,
+        embedder_name=embedder_name,
+        dimensions=_embedding_dimensions(),
+        replace=do_replace_index,
+    )
+
+    # Build documents. With userProvided embedder, every document must have _vectors.<embedder_name> = array or null.
+    print(f"Building {len(terms)} documents (embedder: {embedder_name}) ...")
     seen_ids: dict[str, dict] = {}
+    embedded_count = 0
     for t in terms:
         doc = {
             "id": t["id"],
@@ -247,28 +306,43 @@ def load_hpo(
             "synonyms_str": t["synonyms_str"],
         }
         if use_embedding and "_embedding" in t:
-            doc["_embedding"] = t["_embedding"]
+            doc["_vectors"] = {embedder_name: t["_embedding"]}
+            embedded_count += 1
+        else:
+            doc["_vectors"] = {embedder_name: None}
         seen_ids[t["id"]] = doc
     documents = list(seen_ids.values())
     if len(documents) < len(terms):
         print(f"Deduplicated by id: {len(terms)} terms -> {len(documents)} documents (dropped {len(terms) - len(documents)} duplicate ids).")
+    if embedded_count:
+        print(f"✓ {embedded_count}/{len(documents)} documents have embeddings; {len(documents) - embedded_count} set to null.")
 
     # Primary key must be alphanumeric/underscore/hyphen only; id = HP_0000001, hpo_id = HP:0000001 for display
 
     # Meilisearch indexation is async: we must wait for each task or data may not appear
     timeout_ms = 300_000  # 5 min per batch for large payloads with embeddings
-    print(f"Indexing {len(documents)} documents (batch_size={batch_size}) ...")
+    print(f"Indexing {len(documents)} documents (batch_size={batch_size}, timeout={timeout_ms // 1000}s per batch) ...")
+    failed_batches = []
     for i in range(0, len(documents), batch_size):
         batch = documents[i : i + batch_size]
-        task_info = idx.add_documents(batch)
-        task = idx.wait_for_task(task_info.task_uid, timeout_in_ms=timeout_ms)
-        if getattr(task, "status", None) == "failed":
-            err = getattr(task, "error", None) or {}
-            msg = err.get("message", err) if isinstance(err, dict) else err
-            print(f"Meilisearch indexation failed: {msg}", file=sys.stderr)
-            sys.exit(1)
-        print(f"  {min(i + batch_size, len(documents))}/{len(documents)}")
-    print("Done.")
+        try:
+            task_info = idx.add_documents(batch)
+            task = idx.wait_for_task(task_info.task_uid, timeout_in_ms=timeout_ms)
+            if getattr(task, "status", None) == "failed":
+                err = getattr(task, "error", None) or {}
+                msg = err.get("message", err) if isinstance(err, dict) else err
+                print(f"  Batch {i // batch_size + 1} failed: {msg}", file=sys.stderr)
+                failed_batches.append((i, msg))
+            else:
+                print(f"  {min(i + batch_size, len(documents))}/{len(documents)}")
+        except Exception as e:
+            print(f"  Batch {i // batch_size + 1} error: {e}", file=sys.stderr)
+            failed_batches.append((i, str(e)))
+    
+    if failed_batches:
+        print(f"⚠ {len(failed_batches)} batch(es) failed. Check errors above.", file=sys.stderr)
+        sys.exit(1)
+    print("✓ Done. All documents indexed successfully.")
 
 
 def _run_load_hpo(args: argparse.Namespace) -> None:

@@ -1,12 +1,36 @@
-# App only. Meilisearch runs as a shared service: docker compose -f docker-compose.meilisearch.yml up -d
-# Set MEILISEARCH_URL in .env (e.g. http://localhost:7700 or your shared host).
 services:
+  meilisearch:
+    image: getmeili/meilisearch:v1.35.0
+    ports:
+      - "127.0.0.1:7700:7700"
+    environment:
+      MEILI_MASTER_KEY: ${MEILI_MASTER_KEY:-masterKey}
+      MEILI_ENV: development
+    volumes:
+      - meilisearch_data:/meili_data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:7700/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+    networks:
+      - default
+
   app:
     build: .
     ports:
       - "8000:8000"
     environment:
-      MEILISEARCH_URL: ${MEILISEARCH_URL:-http://localhost:7700}
+      MEILISEARCH_URL: http://meilisearch:7700
       MEILI_MASTER_KEY: ${MEILI_MASTER_KEY:-masterKey}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - ./data:/app/data
+    depends_on:
+      meilisearch:
+        condition: service_healthy
+
+volumes:
+  meilisearch_data:

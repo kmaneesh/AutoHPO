@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AutoHPO</title>
+  <link rel="stylesheet" href="/static/css/site.css">
+  <link rel="stylesheet" href="/static/css/tailwind.css">
+</head>
+<body>
+  <div class="page-wrap">
+    <div class="main-content">
+      <header class="page-header">
+        <h1>AutoHPO</h1>
+        <p class="muted">HPO term search and clinical term extraction from patient history.</p>
+      </header>
+
+      <div class="mode-tabs" role="tablist">
+        <button type="button" role="tab" id="tab-search" aria-selected="true" aria-controls="panel-search">Search</button>
+        <button type="button" role="tab" id="tab-history" aria-selected="false" aria-controls="panel-history">Extract terms (agent)</button>
+      </div>
+
+      <!-- Search mode -->
+      <section id="panel-search" role="tabpanel" aria-labelledby="tab-search" class="panel">
+        <label for="search-query">Type to search HPO (live)</label>
+        <input type="text" id="search-query" name="query" placeholder="e.g. atrial septal defect, tachycardia…" autocomplete="off" />
+        <div id="search-result" class="search-result" aria-live="polite"></div>
+      </section>
+
+      <!-- History mode: full-height chat -->
+      <section id="panel-history" role="tabpanel" aria-labelledby="tab-history" class="panel hidden panel-chat">
+        <div class="chat-panel">
+          <div id="chat-history" class="chat-history" aria-live="polite"></div>
+          <form id="chat-form" class="chat-form">
+            <label for="chat-query">Paste clinical note or message</label>
+            <textarea id="chat-query" name="query" rows="3" placeholder="Paste clinical note…"></textarea>
+            <button type="submit" id="chat-send">Send</button>
+          </form>
+        </div>
+      </section>
+    </div>
+
+    <aside class="debug-sidebar" id="debug-sidebar">
+      <details class="debug-details" id="debug-details">
+        <summary>Request / response</summary>
+        <div id="debug-content" class="debug-content"></div>
+      </details>
+    </aside>
+  </div>
+
+  <button type="button" class="debug-toggle" id="debug-toggle" title="Toggle debug panel">{}</button>
+  <input type="checkbox" id="debug" name="debug" class="sr-only" />
+
+  <script src="/static/js/alpine.js" defer></script>
+  <script src="/static/js/app.js" defer></script>
+</body>
+</html>
