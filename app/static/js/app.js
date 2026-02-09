@@ -139,10 +139,21 @@
         if (list.length === 0) {
           html += '<p>No HPO terms found. Embeddings may not be available.</p>';
         } else {
-          html += '<ul class="result-list">' + list.map(function (t) {
-            return '<li><span class="hpo-id">' + escapeHtml(t.hpo_id || '') + '</span> ' + escapeHtml(t.name || '') +
-              (t.definition ? '<br><small>' + escapeHtml((t.definition || '').slice(0, 120)) + '…</small>' : '') + '</li>';
-          }).join('') + '</ul>';
+          html += '<table class="extract-table"><thead><tr>';
+          html += '<th class="col-hpo-id">HPO ID</th><th class="col-name">HPO Name</th><th class="col-def">HPO Definition</th>';
+          html += '</tr></thead><tbody>';
+          list.forEach(function (t) {
+            var id = t.hpo_id || '—';
+            var name = t.name || '—';
+            var def = (t.definition || '').slice(0, 300);
+            if (t.definition && t.definition.length > 300) def += '…';
+            html += '<tr>';
+            html += '<td class="col-hpo-id"><span class="hpo-id">' + escapeHtml(id) + '</span></td>';
+            html += '<td class="col-name">' + escapeHtml(name) + '</td>';
+            html += '<td class="col-def">' + escapeHtml(def || '—') + '</td>';
+            html += '</tr>';
+          });
+          html += '</tbody></table>';
         }
         storeDebug(debug);
         vectorResultEl.innerHTML = html;
