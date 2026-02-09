@@ -243,6 +243,7 @@ def vector_search_hpo(query: str, limit: int = 10) -> tuple[list[dict], dict]:
     """
     Pure vector search (semantic similarity only, no keyword matching) over HPO index.
     Returns (results, debug_info). If embeddings are not available, returns empty results.
+    Uses hybrid search with empty query to force vector-only results.
     """
     debug: dict = {"query_raw": query, "query_sent": "", "search_params": {}, "hit_count": 0, "raw_first_hit_keys": [], "error": None}
     search_q = query.strip()
@@ -260,20 +261,27 @@ def vector_search_hpo(query: str, limit: int = 10) -> tuple[list[dict], dict]:
             debug["error"] = "embeddings not available"
             return [], debug
         
-        # Pure vector search: use empty query string with vector parameter
+        # Pure vector search: use empty query string with vector + hybrid parameters
+        # The hybrid.semanticRatio can be set to 1.0 to force pure vector, but empty query achieves same
         search_params: dict = {
             "limit": limit,
             "vector": query_vector,
+            "hybrid": {
+                "embedder": HPO_EMBEDDING_MODEL,
+                "semanticRatio": 1.0  # 1.0 = pure vector, 0.0 = pure keyword
+            }
         }
-        debug["search_params"] = {"limit": limit, "vector": f"[{len(query_vector)} dims]"}
+        debug["search_params"] = {"limit": limit, "vector": f"[{len(query_vector)} dims]", "hybrid": {"embedder": HPO_EMBEDDING_MODEL, "semanticRatio": 1.0}}
         
-        # Empty query string forces vector-only search
+        # Empty query string with semanticRatio=1.0 forces pure vector search
         response = index.search("", search_params)
         hits = response.get("hits") or []
         debug["hit_count"] = len(hits)
         
         if hits:
-            debug["raw_first_hit_keys"] = list(hits[0].keys()) if hits else []
+            debug["raw_first_hit_keys"] = list(hits[0].keys())
+        
+        logger.info("vector_search_hpo(%r) → %d hits", search_q, len(hits))
         
         results = [
             {
