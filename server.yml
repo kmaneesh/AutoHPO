@@ -1,0 +1,21 @@
+# Production docker-compose for app only
+# Connects to existing Meilisearch instance on host at localhost:7700
+# Usage: docker compose -f server.yml up -d
+
+services:
+  app:
+    build: .
+    network_mode: host
+    environment:
+      MEILISEARCH_URL: ${MEILISEARCH_URL:-http://localhost:7700}
+      MEILI_MASTER_KEY: ${MEILI_MASTER_KEY:-masterKey}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-http://100.74.210.70:1234/v1}
+      OPENAI_MODEL_ID: ${OPENAI_MODEL_ID:-Qwen2.5-7B-Instruct-1M-Q4_K_M.gguf}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-NA}
+      ENABLE_EMBEDDING: ${ENABLE_EMBEDDING:-true}
+      HPO_EMBEDDING_MODEL: ${HPO_EMBEDDING_MODEL:-all-MiniLM-L6-v2}
+      HPO_EMBEDDING_DIMENSIONS: ${HPO_EMBEDDING_DIMENSIONS:-384}
+      AGENT_DB_FILE: ${AGENT_DB_FILE:-data/agent.db}
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped

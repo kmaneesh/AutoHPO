@@ -25,8 +25,8 @@ AutoHPO is a minimal-stack RAG solution for clinical researchers and bioinformat
 
 ```
 AutoHPO/
-  docker-compose.yml              # App only
-  docker-compose.meilisearch.yml  # Meilisearch as shared service
+  docker-compose.yml              # Development: App + Meilisearch
+  server.yml                      # Production: App only (connects to external Meilisearch)
   Dockerfile
   .env.example
   requirements.txt
@@ -35,43 +35,86 @@ AutoHPO/
     download_hpo.py               # Fetch hp.json to data/
     load_hpo.py                   # Parse, embed (optional), push to Meilisearch
   app/
-    main.py                       # FastAPI, /api/chat, /api/search/fallback
-    agent.py                      # Agno agent + search_hpo tool
-    search.py                     # Meilisearch client
+    main.py                       # FastAPI, /api/chat, /api/search
+    agent.py                      # Agno agent + HPO tools
+    search.py                     # In-memory HPO search
+    hpo.py                        # Meilisearch client
   static/
     index.html
 ```
 
+## Docker Compose Files
+
+- **`docker-compose.yml`**: Development setup with both app and Meilisearch services
+- **`server.yml`**: Production setup with app only, connects to existing Meilisearch on localhost:7700
+
 ## Quick start
 
-1. **Clone and install**
+### Development (with Docker)
+
+1. **Clone and configure**
    ```bash
-   python -m venv .venv && source .venv/bin/activate
-   pip install -r requirements.txt
-   cp .env.example .env   # set MEILISEARCH_URL, MEILI_MASTER_KEY, etc.
+   git clone <repo-url>
+   cd AutoHPO
+   cp .env.example .env   # Edit: set MEILI_MASTER_KEY, OPENAI_BASE_URL, etc.
    ```
 
-2. **Start Meilisearch** (shared service)
+2. **Start services**
    ```bash
-   docker compose -f docker-compose.meilisearch.yml up -d
+   docker compose up -d
    ```
 
-3. **Download and load HPO**
+3. **Download and load HPO data**
    ```bash
    python scripts/download_hpo.py
    python scripts/load_hpo.py
    ```
-   Optional: set `ENABLE_EMBEDDING=false` in `.env` for keyword-only; set `EMBEDDING_MODEL` for a different sentence-transformers model.
 
-4. **Run the app**
+4. **Access the app**
+   - Web UI: http://localhost:8000
+   - API: http://localhost:8000/docs
+
+### Production (external Meilisearch)
+
+If you already have Meilisearch running on localhost:7700:
+
+1. **Configure**
+   ```bash
+   cp .env.example .env
+   # Ensure MEILISEARCH_URL=http://localhost:7700 (default)
+   # Set MEILI_MASTER_KEY to match your Meilisearch instance
+   ```
+
+2. **Start app only**
+   ```bash
+   docker compose -f server.yml up -d
+   ```
+
+3. **Load HPO data** (if not already loaded)
+   ```bash
+   python scripts/download_hpo.py
+   python scripts/load_hpo.py
+   ```
+
+### Local development (without Docker)
+
+1. **Install dependencies**
+   ```bash
+   python -m venv .venv && source .venv/bin/activate
+   pip install -r requirements.txt
+   ```
+
+2. **Start Meilisearch** (using Docker)
+   ```bash
+   docker run -d -p 7700:7700 \
+     -e MEILI_MASTER_KEY=masterKey \
+     getmeili/meilisearch:v1.35.0
+   ```
+
+3. **Run the app**
    ```bash
    uvicorn app.main:app --reload --port 8000
    ```
-   Or with Docker: `docker compose up -d` (app uses `MEILISEARCH_URL` from `.env`).
-
-5. **Use the API**
-   - Agent: `POST /api/chat` with `{"query": "heart defect"}` (requires `OPENAI_API_KEY`).
-   - Fallback: `POST /api/search/fallback` with `{"query": "heart defect"}`.
 
 ## Environment (.env)
 

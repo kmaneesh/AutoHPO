@@ -65,21 +65,18 @@ def init_app() -> None:
     global _client, _index, _embedding_model
     if _client is None:
         from meilisearch import Client as MeilisearchClient
-        url = (os.environ.get("MEILISEARCH_URL") or "").strip()
-        if url:
-            api_key = (os.environ.get("MEILI_MASTER_KEY") or "").strip() or None
-            _client = MeilisearchClient(url, api_key=api_key)
-            _configure_session(_client)
-            # Cache the index object (just a reference, no network call)
-            _index = _client.index(HPO_INDEX_UID)
-            # Health check: verify Meilisearch is reachable
-            try:
-                health = _client.health()
-                logger.info("Meilisearch health OK: %s — %s", url, health)
-            except Exception as exc:
-                logger.error("Meilisearch health check FAILED at %s: %s", url, exc)
-        else:
-            logger.warning("MEILISEARCH_URL not set — Meilisearch search will fail")
+        url = (os.environ.get("MEILISEARCH_URL") or "http://localhost:7700").strip()
+        api_key = (os.environ.get("MEILI_MASTER_KEY") or "").strip() or None
+        _client = MeilisearchClient(url, api_key=api_key)
+        _configure_session(_client)
+        # Cache the index object (just a reference, no network call)
+        _index = _client.index(HPO_INDEX_UID)
+        # Health check: verify Meilisearch is reachable
+        try:
+            health = _client.health()
+            logger.info("Meilisearch health OK: %s — %s", url, health)
+        except Exception as exc:
+            logger.error("Meilisearch health check FAILED at %s: %s", url, exc)
     if _embedding_model is None:
         try:
             from sentence_transformers import SentenceTransformer
@@ -121,7 +118,7 @@ def get_client():
     if _client is None:
         init_app()
     if _client is None:
-        raise ValueError("MEILISEARCH_URL is not set")
+        raise ValueError("Failed to initialize Meilisearch client")
     return _client
 
 
