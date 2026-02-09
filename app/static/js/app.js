@@ -133,9 +133,7 @@
           return;
         }
         const list = data.results || [];
-        const querySent = data.query_sent != null ? String(data.query_sent) : '';
         let html = '';
-        if (querySent) html += '<p class="query-sent"><strong>Query:</strong> <code>' + escapeHtml(querySent) + '</code> (vector embeddings only)</p>';
         if (list.length === 0) {
           html += '<p>No HPO terms found. Embeddings may not be available.</p>';
         } else {
