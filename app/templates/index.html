@@ -17,7 +17,8 @@
 
       <div class="mode-tabs" role="tablist">
         <button type="button" role="tab" id="tab-search" aria-selected="true" aria-controls="panel-search">Search</button>
-        <button type="button" role="tab" id="tab-history" aria-selected="false" aria-controls="panel-history">Extract terms (agent)</button>
+        <button type="button" role="tab" id="tab-vector" aria-selected="false" aria-controls="panel-vector">Vector</button>
+        <button type="button" role="tab" id="tab-history" aria-selected="false" aria-controls="panel-history">Agent</button>
       </div>
 
       <!-- Search mode -->
@@ -25,6 +26,13 @@
         <label for="search-query">Type to search HPO (live)</label>
         <input type="text" id="search-query" name="query" placeholder="e.g. atrial septal defect, tachycardia…" autocomplete="off" />
         <div id="search-result" class="search-result" aria-live="polite"></div>
+      </section>
+
+      <!-- Vector mode -->
+      <section id="panel-vector" role="tabpanel" aria-labelledby="tab-vector" class="panel hidden">
+        <label for="vector-query">Type to search HPO by semantic similarity (vector embeddings only)</label>
+        <input type="text" id="vector-query" name="query" placeholder="e.g. atrial septal defect, tachycardia…" autocomplete="off" />
+        <div id="vector-result" class="search-result" aria-live="polite"></div>
       </section>
 
       <!-- History mode: full-height chat -->

@@ -1,16 +1,22 @@
 (function () {
   const TAB_SEARCH = 'tab-search';
+  const TAB_VECTOR = 'tab-vector';
   const TAB_HISTORY = 'tab-history';
   const PANEL_SEARCH = 'panel-search';
+  const PANEL_VECTOR = 'panel-vector';
   const PANEL_HISTORY = 'panel-history';
   const SEARCH_DEBOUNCE_MS = 280;
 
   const tabSearch = document.getElementById('tab-search');
+  const tabVector = document.getElementById('tab-vector');
   const tabHistory = document.getElementById('tab-history');
   const panelSearch = document.getElementById('panel-search');
+  const panelVector = document.getElementById('panel-vector');
   const panelHistory = document.getElementById('panel-history');
   const searchQueryInput = document.getElementById('search-query');
+  const vectorQueryInput = document.getElementById('vector-query');
   const searchResultEl = document.getElementById('search-result');
+  const vectorResultEl = document.getElementById('vector-result');
   const chatForm = document.getElementById('chat-form');
   const chatQueryInput = document.getElementById('chat-query');
   const chatHistoryEl = document.getElementById('chat-history');
@@ -25,14 +31,24 @@
 
   function setActiveTab(tabId) {
     const isSearch = tabId === TAB_SEARCH;
+    const isVector = tabId === TAB_VECTOR;
+    const isHistory = tabId === TAB_HISTORY;
+    
     tabSearch.setAttribute('aria-selected', isSearch ? 'true' : 'false');
-    tabHistory.setAttribute('aria-selected', isSearch ? 'false' : 'true');
+    tabVector.setAttribute('aria-selected', isVector ? 'true' : 'false');
+    tabHistory.setAttribute('aria-selected', isHistory ? 'true' : 'false');
+    
     panelSearch.classList.toggle('hidden', !isSearch);
-    panelHistory.classList.toggle('hidden', isSearch);
-    if (isSearch) searchQueryInput.focus(); else chatQueryInput.focus();
+    panelVector.classList.toggle('hidden', !isVector);
+    panelHistory.classList.toggle('hidden', !isHistory);
+    
+    if (isSearch) searchQueryInput.focus();
+    else if (isVector) vectorQueryInput.focus();
+    else chatQueryInput.focus();
   }
 
   tabSearch.addEventListener('click', function () { setActiveTab(TAB_SEARCH); });
+  tabVector.addEventListener('click', function () { setActiveTab(TAB_VECTOR); });
   tabHistory.addEventListener('click', function () { setActiveTab(TAB_HISTORY); });
 
   // ---- Search mode: live as you type (POST /api/search, in-memory only; no Meilisearch from UI) ----
@@ -89,6 +105,62 @@
   searchQueryInput.addEventListener('focus', function () {
     const q = (searchQueryInput.value || '').trim();
     if (q) runSearch();
+  });
+
+  // ---- Vector mode: live semantic search (POST /api/vector, Meilisearch vector-only) ----
+  let vectorDebounceTimer = null;
+  function runVectorSearch() {
+    const q = (vectorQueryInput.value || '').trim();
+    if (!q) {
+      vectorResultEl.innerHTML = '<p class="muted">Type a query to see HPO results by semantic similarity.</p>';
+      return;
+    }
+    vectorResultEl.innerHTML = '<p class="loading"><span class="spinner" aria-hidden="true"></span> Searching…</p>';
+    const debug = { request: { method: 'POST', url: '/api/vector', body: { query: q } }, response: {} };
+    fetch('/api/vector', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ query: q })
+    })
+      .then(function (res) { return res.json().then(function (data) { return { res, data }; }); })
+      .then(function (_) {
+        const res = _.res;
+        const data = _.data;
+        debug.response = { status: res.status, body: data };
+        if (!res.ok) {
+          vectorResultEl.innerHTML = '<p class="error">Error: ' + escapeHtml(data.detail || res.statusText) + '</p>';
+          storeDebug(debug);
+          return;
+        }
+        const list = data.results || [];
+        const querySent = data.query_sent != null ? String(data.query_sent) : '';
+        let html = '';
+        if (querySent) html += '<p class="query-sent"><strong>Query:</strong> <code>' + escapeHtml(querySent) + '</code> (vector embeddings only)</p>';
+        if (list.length === 0) {
+          html += '<p>No HPO terms found. Embeddings may not be available.</p>';
+        } else {
+          html += '<ul class="result-list">' + list.map(function (t) {
+            return '<li><span class="hpo-id">' + escapeHtml(t.hpo_id || '') + '</span> ' + escapeHtml(t.name || '') +
+              (t.definition ? '<br><small>' + escapeHtml((t.definition || '').slice(0, 120)) + '…</small>' : '') + '</li>';
+          }).join('') + '</ul>';
+        }
+        storeDebug(debug);
+        vectorResultEl.innerHTML = html;
+      })
+      .catch(function (e) {
+        vectorResultEl.innerHTML = '<p class="error">Error: ' + escapeHtml(e.message) + '</p>';
+        debug.response = { status: '—', body: { error: e.message } };
+        storeDebug(debug);
+      });
+  }
+
+  vectorQueryInput.addEventListener('input', function () {
+    if (vectorDebounceTimer) clearTimeout(vectorDebounceTimer);
+    vectorDebounceTimer = setTimeout(runVectorSearch, SEARCH_DEBOUNCE_MS);
+  });
+  vectorQueryInput.addEventListener('focus', function () {
+    const q = (vectorQueryInput.value || '').trim();
+    if (q) runVectorSearch();
   });
 
   // ---- History (chat) mode: post message, agent returns extracted terms ----

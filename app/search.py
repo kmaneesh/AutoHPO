@@ -148,3 +148,24 @@ def api_search(body: SearchRequest):
         return {"query_sent": query_sent, "results": results}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/api/vector")
+def api_vector_search(body: SearchRequest):
+    """Pure vector search: semantic similarity only (no keyword matching). Returns results from Meilisearch embeddings."""
+    try:
+        from app import hpo
+        results, debug = hpo.vector_search_hpo(body.query, limit=15)
+        return {
+            "query_sent": debug.get("query_sent", ""),
+            "results": results,
+            "debug": debug if _debug_enabled() else None
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+def _debug_enabled() -> bool:
+    """Check if debug mode is enabled via environment variable."""
+    import os
+    return os.environ.get("DEBUG", "").lower() in ("true", "1", "yes")

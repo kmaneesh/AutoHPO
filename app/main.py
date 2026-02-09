@@ -7,7 +7,8 @@ Routes:
   GET  /static/*    – Static assets
   GET  /api/sse     – SSE for MCP (mcp_server)
   POST /api/chat     – Agent (extract terms from history)
-  POST /api/search   – Pure HPO search (search)
+  POST /api/search   – Pure HPO search (in-memory regex)
+  POST /api/vector   – Pure vector search (semantic similarity only)
 """
 from contextlib import asynccontextmanager
 from pathlib import Path

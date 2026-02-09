@@ -237,3 +237,57 @@ def get_term_by_id(term_id: str) -> dict | None:
         }
     except Exception:
         return None
+
+
+def vector_search_hpo(query: str, limit: int = 10) -> tuple[list[dict], dict]:
+    """
+    Pure vector search (semantic similarity only, no keyword matching) over HPO index.
+    Returns (results, debug_info). If embeddings are not available, returns empty results.
+    """
+    debug: dict = {"query_raw": query, "query_sent": "", "search_params": {}, "hit_count": 0, "raw_first_hit_keys": [], "error": None}
+    search_q = query.strip()
+    debug["query_sent"] = search_q
+    
+    if not search_q:
+        debug["error"] = "empty query"
+        return [], debug
+    
+    try:
+        index = get_index()
+        query_vector = _embed_query(search_q)
+        
+        if query_vector is None:
+            debug["error"] = "embeddings not available"
+            return [], debug
+        
+        # Pure vector search: use empty query string with vector parameter
+        search_params: dict = {
+            "limit": limit,
+            "vector": query_vector,
+        }
+        debug["search_params"] = {"limit": limit, "vector": f"[{len(query_vector)} dims]"}
+        
+        # Empty query string forces vector-only search
+        response = index.search("", search_params)
+        hits = response.get("hits") or []
+        debug["hit_count"] = len(hits)
+        
+        if hits:
+            debug["raw_first_hit_keys"] = list(hits[0].keys()) if hits else []
+        
+        results = [
+            {
+                "hpo_id": h.get("hpo_id"),
+                "name": h.get("name"),
+                "definition": (h.get("definition") or "")[:500],
+                "synonyms_str": h.get("synonyms_str") or "",
+                "score": h.get("_semanticScore", 0.0),
+            }
+            for h in hits
+        ]
+        
+        return results, debug
+    except Exception as exc:
+        logger.error("vector_search_hpo FAILED: %s", exc, exc_info=True)
+        debug["error"] = str(exc)
+        return [], debug
