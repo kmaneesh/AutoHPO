@@ -5,9 +5,12 @@
 services:
   app:
     build: .
-    network_mode: host
+    ports:
+      - "8000:8000"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     environment:
-      MEILISEARCH_URL: ${MEILISEARCH_URL:-http://localhost:7700}
+      MEILISEARCH_URL: ${MEILISEARCH_URL:-http://host.docker.internal:7700}
       MEILI_MASTER_KEY: ${MEILI_MASTER_KEY:-masterKey}
       OPENAI_BASE_URL: ${OPENAI_BASE_URL:-http://100.74.210.70:1234/v1}
       OPENAI_MODEL_ID: ${OPENAI_MODEL_ID:-qwen2.5-7b-instruct-1m}
